@@ -15,3 +15,4 @@ const FieldVisitSchema = new mongoose.Schema({
 });
 
 module.exports = mongoose.model('FieldVisit', FieldVisitSchema);
+

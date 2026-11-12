@@ -15,3 +15,4 @@ const FollowupSchema = new mongoose.Schema({
 });
 
 module.exports = mongoose.model('Followup', FollowupSchema);
+

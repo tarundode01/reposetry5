@@ -17,3 +17,4 @@ const ApprovalRequestSchema = new mongoose.Schema({
 });
 
 module.exports = mongoose.model('ApprovalRequest', ApprovalRequestSchema);
+

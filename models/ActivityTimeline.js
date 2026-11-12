@@ -10,3 +10,4 @@ const ActivityTimelineSchema = new mongoose.Schema({
 });
 
 module.exports = mongoose.model('ActivityTimeline', ActivityTimelineSchema);
+
