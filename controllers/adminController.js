@@ -195,7 +195,10 @@ exports.deleteEmployee = async (req, res) => {
 // 4. Lead Management & Assignment
 exports.getAllLeads = async (req, res) => {
   try {
-    const leads = await Enquiry.find({}).populate('assignedSales', 'name email phone').sort({ createdAt: -1 });
+    const leads = await Enquiry.find({})
+      .populate('customerId', 'name email phone company businessType designation gstNumber avatar')
+      .populate('assignedSalesId', 'name email phone designation avatar')
+      .sort({ createdAt: -1 });
     res.json({ success: true, data: leads });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -209,12 +212,30 @@ exports.assignLead = async (req, res) => {
     const lead = await Enquiry.findById(id);
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
-    lead.assignedSales = employeeId;
+    let emp = null;
+    if (employeeId) {
+      emp = await User.findById(employeeId);
+      if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    lead.assignedSalesId = emp ? emp._id : null;
+    lead.assignedSales = {
+      name: emp ? emp.name : null,
+      phone: emp ? emp.phone : null,
+      email: emp ? emp.email : null,
+      designation: emp ? (emp.designation || 'Sales Consultant') : null
+    };
+    lead.status = emp ? 'Assigned' : 'Submitted';
+
     lead.timeline.push({
-      step: 'Assigned by Admin',
+      status: lead.status,
+      title: emp ? `Assigned to ${emp.name}` : 'Unassigned',
+      step: emp ? `Assigned to ${emp.name}` : 'Unassigned',
       date: new Date().toLocaleDateString('en-GB'),
-      note: 'Reassigned via Admin Portal'
+      note: emp ? `Admin designated ${emp.name} (${emp.phone || emp.email}) as the dedicated sales consultant.` : 'Unassigned by Admin',
+      timestamp: new Date()
     });
+
     await lead.save();
 
     res.json({ success: true, message: 'Lead assigned successfully', data: lead });
@@ -258,6 +279,45 @@ exports.getAllCustomers = async (req, res) => {
   }
 };
 
+exports.deleteCustomer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await User.findByIdAndDelete(id);
+    // Also remove pending approval requests related to this customer
+    await ApprovalRequest.deleteMany({ requestedBy: id });
+    res.json({ success: true, message: 'Customer account deleted permanently' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// Toggle user status (Approve, Suspend, Activate) for both Customer and Employee
+exports.toggleUserStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, isApproved } = req.body;
+    const updateData = {};
+    if (status) updateData.status = status;
+    if (typeof isApproved === 'boolean') updateData.isApproved = isApproved;
+    if (status === 'active') updateData.isApproved = true;
+    if (status === 'suspended') updateData.isApproved = false;
+
+    const user = await User.findByIdAndUpdate(id, updateData, { new: true }).select('-password');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Also update any pending approval request for this user
+    if (status === 'active' || isApproved === true) {
+      await ApprovalRequest.updateMany({ requestedBy: id }, { status: 'Approved' });
+    } else if (status === 'suspended') {
+      await ApprovalRequest.updateMany({ requestedBy: id }, { status: 'Rejected' });
+    }
+
+    res.json({ success: true, message: `Account updated to ${user.status}`, data: user });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // 6. Deals & Pipeline
 exports.getAllDeals = async (req, res) => {
   try {
@@ -285,7 +345,10 @@ exports.createDealAdmin = async (req, res) => {
 // 7. Approvals Management
 exports.getAllApprovals = async (req, res) => {
   try {
-    const approvals = await ApprovalRequest.find({}).populate('employee', 'name email').sort({ createdAt: -1 });
+    const approvals = await ApprovalRequest.find({})
+      .populate('employee', 'name email phone role designation')
+      .populate('requestedBy', 'name email phone role company businessType designation status isApproved')
+      .sort({ createdAt: -1 });
     res.json({ success: true, data: approvals });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -297,6 +360,24 @@ exports.updateApproval = async (req, res) => {
     const { id } = req.params;
     const { status, managerComment } = req.body;
     const approval = await ApprovalRequest.findByIdAndUpdate(id, { status, managerComment }, { new: true });
+
+    if (!approval) {
+      return res.status(404).json({ success: false, message: 'Approval request not found' });
+    }
+
+    // If this is a New Customer or Employee Registration, update the user account status in database
+    if (
+      (approval.requestType === 'New Employee Registration' || 
+       approval.requestType === 'New Customer Registration') && 
+      approval.requestedBy
+    ) {
+      const isApproved = status === 'Approved';
+      await User.findByIdAndUpdate(approval.requestedBy, {
+        status: isApproved ? 'active' : 'suspended',
+        isApproved
+      });
+    }
+
     res.json({ success: true, message: `Request marked as ${status}`, data: approval });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -308,6 +389,51 @@ exports.getAllTickets = async (req, res) => {
   try {
     const tickets = await Ticket.find({}).sort({ createdAt: -1 });
     res.json({ success: true, data: tickets });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.replyTicketAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+    if (!message || !message.trim()) {
+      return res.status(400).json({ success: false, message: 'Message content is required' });
+    }
+
+    const ticket = await Ticket.findById(id);
+    if (!ticket) {
+      return res.status(404).json({ success: false, message: 'Ticket not found' });
+    }
+
+    ticket.messages.push({
+      sender: 'support',
+      senderName: req.user ? req.user.name || 'Executive Support Admin' : 'Executive Support Admin',
+      message: message.trim(),
+      createdAt: new Date()
+    });
+
+    if (ticket.status === 'open') {
+      ticket.status = 'in_progress';
+    }
+
+    await ticket.save();
+    res.json({ success: true, message: 'Reply sent to customer successfully', data: ticket });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateTicketStatusAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const ticket = await Ticket.findByIdAndUpdate(id, { status }, { new: true });
+    if (!ticket) {
+      return res.status(404).json({ success: false, message: 'Ticket not found' });
+    }
+    res.json({ success: true, message: `Ticket status updated to ${status}`, data: ticket });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

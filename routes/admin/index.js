@@ -25,6 +25,8 @@ router.put('/leads/:id/assign', adminController.assignLead);
 
 // Customers
 router.get('/customers', adminController.getAllCustomers);
+router.delete('/customers/:id', adminController.deleteCustomer);
+router.put('/users/:id/status', adminController.toggleUserStatus);
 
 // Deals & Sales Pipeline
 router.get('/deals', adminController.getAllDeals);
@@ -36,5 +38,7 @@ router.put('/approvals/:id', adminController.updateApproval);
 
 // Support
 router.get('/tickets', adminController.getAllTickets);
+router.post('/tickets/:id/reply', adminController.replyTicketAdmin);
+router.put('/tickets/:id/status', adminController.updateTicketStatusAdmin);
 
 module.exports = router;

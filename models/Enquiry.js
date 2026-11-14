@@ -30,31 +30,53 @@ const enquirySchema = new mongoose.Schema({
     type: String,
     default: 'Anytime'
   },
+  priority: {
+    type: String,
+    default: 'Medium'
+  },
+  source: {
+    type: String,
+    default: 'Customer App'
+  },
   status: {
     type: String,
     enum: [
       'Submitted',
       'Received',
       'Under Review',
+      'Assigned',
       'Contacted',
       'In Discussion',
       'Proposal Sent',
       'Negotiation',
       'Converted',
       'Closed',
-      'Cancelled'
+      'Cancelled',
+      'New',
+      'Qualified',
+      'Lost'
     ],
     default: 'Submitted'
   },
+  // Employee ObjectId assignment for SaaS multi-tenant isolation
+  assignedSalesId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  // Embedded details of assigned employee for fast customer view display
   assignedSales: {
-    name: { type: String, default: 'Vikram Malhotra' },
-    phone: { type: String, default: '+91 98112 34567' },
-    email: { type: String, default: 'sales@crm.com' }
+    name: { type: String, default: null },
+    phone: { type: String, default: null },
+    email: { type: String, default: null },
+    designation: { type: String, default: null }
   },
   timeline: [
     {
       status: String,
       title: String,
+      step: String,
+      date: String,
       note: String,
       timestamp: { type: Date, default: Date.now }
     }
@@ -62,16 +84,21 @@ const enquirySchema = new mongoose.Schema({
   attachments: [String]
 }, { timestamps: true });
 
+enquirySchema.index({ customerId: 1, createdAt: -1 });
+enquirySchema.index({ assignedSalesId: 1, status: 1 });
+
 enquirySchema.pre('save', function (next) {
   if (!this.enquiryId) {
     this.enquiryId = `ENQ-${Math.floor(100000 + Math.random() * 900000)}`;
   }
-  if (this.timeline.length === 0) {
-    this.timeline.push({
+  if (!this.timeline || this.timeline.length === 0) {
+    this.timeline = [{
       status: 'Submitted',
       title: 'Enquiry Submitted',
-      note: 'Your enquiry has been received and queued for review.'
-    });
+      step: 'Enquiry Submitted',
+      note: 'Your enquiry has been received and queued for review.',
+      timestamp: new Date()
+    }];
   }
   next();
 });

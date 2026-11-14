@@ -68,8 +68,12 @@ const userSchema = new mongoose.Schema({
   otpExpires: Date,
   status: {
     type: String,
-    enum: ['active', 'inactive', 'suspended'],
+    enum: ['active', 'inactive', 'suspended', 'pending_approval'],
     default: 'active'
+  },
+  isApproved: {
+    type: Boolean,
+    default: true
   },
   activeSessions: [
     {

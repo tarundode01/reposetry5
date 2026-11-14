@@ -35,7 +35,70 @@ const logActivity = async (employeeId, actionType, title, details = '') => {
   }
 };
 
-// 1. Employee Login
+// 1. Employee Registration / Sign Up (SaaS Flow - Pending Admin Approval)
+exports.employeeRegister = async (req, res) => {
+  try {
+    const { name, email, phone, password, designation, department } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({ success: false, message: 'Name, email and password are required' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const existingUser = await User.findOne({ email: cleanEmail });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: 'Account with this email already exists' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+    const userCount = await User.countDocuments({ role: 'sales' });
+    const employeeId = `EMP-${7800 + userCount + 1}`;
+
+    const user = await User.create({
+      name,
+      email: cleanEmail,
+      phone: phone || '',
+      password: hashedPassword,
+      role: 'sales',
+      designation: designation || 'Sales Executive',
+      department: department || 'Sales & Business Development',
+      employeeId,
+      company: 'OmniCRM Enterprise',
+      status: 'pending_approval',
+      isApproved: false
+    });
+
+    // Notify Admin by creating an Approval Request in MongoDB
+    await ApprovalRequest.create({
+      requestType: 'New Employee Registration',
+      requestedBy: user._id,
+      requestedByName: `${user.name} (${user.designation})`,
+      details: `New staff account created (${user.email}). Awaiting Managerial Approval.`,
+      status: 'Pending',
+      amount: employeeId
+    });
+
+    await logActivity(user._id, 'Register', 'Employee Registration Submitted', `Awaiting admin approval for ${user.email}`);
+
+    res.status(201).json({
+      success: true,
+      pendingApproval: true,
+      message: 'Account registered! Your access request has been sent to Admin. You will be able to sign in once approved.',
+      data: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        employeeId: user.employeeId,
+        status: user.status,
+        isApproved: false
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// 1. Employee Login (Checks Approval Status)
 exports.employeeLogin = async (req, res) => {
   try {
     const { identifier, password } = req.body;
@@ -64,7 +127,9 @@ exports.employeeLogin = async (req, res) => {
         company: 'OmniCRM Enterprise',
         designation: 'Senior Account Executive',
         department: 'Sales & Business Development',
-        employeeId: 'EMP-7801'
+        employeeId: 'EMP-7801',
+        status: 'active',
+        isApproved: true
       });
     }
 
@@ -75,6 +140,22 @@ exports.employeeLogin = async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch && password !== 'Employee@123') {
       return res.status(400).json({ success: false, message: 'Invalid employee credentials' });
+    }
+
+    // Check SaaS Approval Status
+    if (user.status === 'pending_approval' || user.isApproved === false) {
+      return res.status(403).json({
+        success: false,
+        pendingApproval: true,
+        message: 'Your account is pending Admin approval. Please wait until your manager approves your request.'
+      });
+    }
+
+    if (user.status === 'suspended' || user.status === 'inactive') {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been deactivated. Please contact your organization administrator.'
+      });
     }
 
     const token = generateToken(user._id);
@@ -100,7 +181,7 @@ exports.employeeLogin = async (req, res) => {
   }
 };
 
-// 2. Comprehensive Employee Dashboard
+// 2. Comprehensive Employee Dashboard (Isolated SaaS Scope: strictly employee's own data)
 exports.getEmployeeDashboard = async (req, res) => {
   try {
     const empId = req.user._id;
@@ -115,17 +196,19 @@ exports.getEmployeeDashboard = async (req, res) => {
       attendanceToday,
       recentTimeline
     ] = await Promise.all([
-      Enquiry.find({ $or: [{ assignedSales: empId }, { customer: { $exists: true } }] }).sort({ createdAt: -1 }),
-      Deal.find({}).sort({ createdAt: -1 }),
+      Enquiry.find({
+        $or: [{ assignedSalesId: empId }, { assignedSales: empId }]
+      }).sort({ createdAt: -1 }),
+      Deal.find({ assignedTo: empId }).sort({ createdAt: -1 }),
       Task.find({ assignedTo: empId }).sort({ dueDate: 1 }),
-      Meeting.find({}).sort({ meetingDate: 1 }),
+      Meeting.find({ employee: empId }).sort({ meetingDate: 1 }),
       Followup.find({ employee: empId }).sort({ followupDate: 1 }),
       Call.find({ employee: empId }).sort({ createdAt: -1 }),
       Attendance.findOne({ employee: empId, date: new Date().toISOString().split('T')[0] }),
       ActivityTimeline.find({ employee: empId }).sort({ createdAt: -1 }).limit(10)
     ]);
 
-    // KPI Metrics calculation
+    // KPI Metrics calculation for THIS specific employee only
     const totalLeads = leads.length;
     const newLeads = leads.filter(l => l.status === 'New' || l.status === 'Open').length;
     const contactedLeads = leads.filter(l => l.status === 'Contacted' || l.status === 'In Progress').length;
@@ -155,10 +238,10 @@ exports.getEmployeeDashboard = async (req, res) => {
           pendingTasks,
           totalMeetings: meetings.length,
           wonDeals,
-          totalRevenue: wonRevenue || 485000,
-          expectedRevenue: totalDealsValue || 1250000,
+          totalRevenue: wonRevenue || 0,
+          expectedRevenue: totalDealsValue || 0,
           monthlyTarget: 1000000,
-          targetAchievedPercentage: Math.round(((wonRevenue || 485000) / 1000000) * 100),
+          targetAchievedPercentage: Math.round(((wonRevenue || 0) / 1000000) * 100),
           todayAttendance: attendanceToday ? attendanceToday.status : 'Not Checked-In'
         },
         recentLeads: leads.slice(0, 5),
@@ -173,23 +256,57 @@ exports.getEmployeeDashboard = async (req, res) => {
   }
 };
 
-// 3. Leads Management: Get, Filter, Search
+// 3. Leads Management: Get only assigned leads to this employee
 exports.getLeads = async (req, res) => {
   try {
     const { status, search, priority } = req.query;
-    let query = {};
+    const empId = req.user._id;
+
+    // Strictly isolate by assigned employee (SaaS Multi-tenant employee data guard)
+    let query = {
+      $or: [{ assignedSalesId: empId }, { assignedSales: empId }]
+    };
+
     if (status && status !== 'All') query.status = status;
     if (priority && priority !== 'All') query.priority = priority;
+
     if (search) {
-      query.$or = [
-        { subject: { $regex: search, $options: 'i' } },
-        { productService: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
-      ];
+      query = {
+        $and: [
+          { $or: [{ assignedSalesId: empId }, { assignedSales: empId }] },
+          {
+            $or: [
+              { subject: { $regex: search, $options: 'i' } },
+              { productService: { $regex: search, $options: 'i' } },
+              { description: { $regex: search, $options: 'i' } },
+              { enquiryId: { $regex: search, $options: 'i' } }
+            ]
+          }
+        ]
+      };
     }
 
-    const leads = await Enquiry.find(query).populate('customer', 'name email phone company').sort({ createdAt: -1 });
-    res.json({ success: true, data: leads });
+    const leads = await Enquiry.find(query)
+      .populate('customerId', 'name email phone company businessType designation gstNumber avatar')
+      .sort({ createdAt: -1 });
+
+    // Format leads for consistent display
+    const formatted = leads.map(l => {
+      const doc = l.toObject();
+      if (doc.customerId && typeof doc.customerId === 'object') {
+        doc.customerName = doc.customerId.name || doc.customerName;
+        doc.phone = doc.customerId.phone || doc.phone;
+        doc.email = doc.customerId.email || doc.email;
+        doc.company = doc.customerId.company || doc.company;
+        doc.businessType = doc.customerId.businessType || doc.businessType;
+        doc.designation = doc.customerId.designation || doc.designation;
+        doc.gstNumber = doc.customerId.gstNumber || doc.gstNumber;
+        doc.customerAvatar = doc.customerId.avatar || doc.customerAvatar;
+      }
+      return doc;
+    });
+
+    res.json({ success: true, data: formatted });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -268,10 +385,24 @@ exports.updateLeadStatus = async (req, res) => {
   }
 };
 
-// 6. Customers Management
+// 6. Customers Management: Get only customers whose leads/enquiries are assigned to this employee
 exports.getMyCustomers = async (req, res) => {
   try {
-    const customers = await User.find({ role: 'customer' }).select('-password').sort({ createdAt: -1 });
+    const empId = req.user._id;
+    // Find all enquiries assigned to this sales employee
+    const assignedEnquiries = await Enquiry.find({
+      $or: [{ assignedSalesId: empId }, { assignedSales: empId }]
+    }).select('customerId');
+
+    const customerIds = assignedEnquiries
+      .map(e => e.customerId)
+      .filter(id => id != null);
+
+    const customers = await User.find({
+      _id: { $in: customerIds },
+      role: 'customer'
+    }).select('-password').sort({ createdAt: -1 });
+
     res.json({ success: true, data: customers });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -432,10 +563,10 @@ exports.checkOut = async (req, res) => {
   }
 };
 
-// 11. Deals & Sales Pipeline
+// 11. Deals & Sales Pipeline (Strictly isolated by assignedSales/employee)
 exports.getDeals = async (req, res) => {
   try {
-    const deals = await Deal.find({}).populate('customer', 'name company email').sort({ createdAt: -1 });
+    const deals = await Deal.find({ assignedSales: req.user._id }).populate('customerId', 'name company email').sort({ createdAt: -1 });
     res.json({ success: true, data: deals });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -447,10 +578,11 @@ exports.createDeal = async (req, res) => {
     const { title, amount, stage, customerId, expectedCloseDate } = req.body;
     const deal = await Deal.create({
       title,
-      amount: Number(amount) || 150000,
+      value: Number(amount) || 150000,
       stage: stage || 'Proposal Sent',
-      customer: customerId,
-      expectedCloseDate: expectedCloseDate || new Date(Date.now() + 86400000 * 15)
+      customerId: customerId || req.user._id,
+      assignedSales: req.user._id,
+      closingDate: expectedCloseDate || new Date(Date.now() + 86400000 * 15)
     });
     await logActivity(req.user._id, 'Deal Created', `New Deal: ${title} (₹${amount})`);
     res.status(201).json({ success: true, data: deal });
@@ -459,21 +591,73 @@ exports.createDeal = async (req, res) => {
   }
 };
 
-// 12. Meetings Management
+// 12. Meetings Management (Strictly isolated by employee)
 exports.getMeetings = async (req, res) => {
   try {
-    const meetings = await Meeting.find({}).sort({ meetingDate: 1 });
+    const meetings = await Meeting.find({ employee: req.user._id }).sort({ meetingDate: 1 });
     res.json({ success: true, data: meetings });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// 13. Quotations Management
+// 13. Quotations Management (Get & Send Quotation to Customer)
 exports.getQuotations = async (req, res) => {
   try {
     const quotations = await Quotation.find({}).sort({ createdAt: -1 });
     res.json({ success: true, data: quotations });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.sendQuotationToCustomer = async (req, res) => {
+  try {
+    const { customerId, title, subTotal, taxGst, totalAmount, items, validUntil, enquiryId } = req.body;
+    if (!customerId || !title || !totalAmount) {
+      return res.status(400).json({ success: false, message: 'Customer ID, Title and Amount are required' });
+    }
+
+    const count = await Quotation.countDocuments();
+    const quotationNumber = `QT-${202600 + count + 1}`;
+
+    const quotation = await Quotation.create({
+      customerId,
+      quotationNumber,
+      title,
+      subTotal: Number(subTotal) || Number(totalAmount),
+      taxGst: Number(taxGst) || 0,
+      totalAmount: Number(totalAmount),
+      status: 'Received',
+      validUntil: validUntil || new Date(Date.now() + 86400000 * 30),
+      items: items && items.length > 0 ? items : [
+        { name: title, qty: 1, rate: Number(totalAmount), amount: Number(totalAmount) }
+      ]
+    });
+
+    // If enquiryId provided, update Enquiry status to 'Proposal Sent' and add to timeline
+    if (enquiryId) {
+      const enquiry = await Enquiry.findById(enquiryId);
+      if (enquiry) {
+        enquiry.status = 'Proposal Sent';
+        enquiry.timeline.push({
+          status: 'Proposal Sent',
+          title: `Quotation Sent (${quotationNumber})`,
+          step: 'Commercial Proposal Dispatched',
+          note: `Dedicated sales consultant prepared and sent formal quotation of ₹${Number(totalAmount).toLocaleString()} for ${title}.`,
+          timestamp: new Date()
+        });
+        await enquiry.save();
+      }
+    }
+
+    await logActivity(req.user._id, 'Quotation Sent', `Sent quotation ${quotationNumber} to customer`, `Amount: ₹${totalAmount}`);
+
+    res.status(201).json({
+      success: true,
+      message: `Commercial proposal & quotation ${quotationNumber} dispatched to customer successfully!`,
+      data: quotation
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -511,6 +695,55 @@ exports.createApprovalRequest = async (req, res) => {
     });
     await logActivity(req.user._id, 'Approval Requested', `${requestType}: ${subject}`);
     res.status(201).json({ success: true, data: approval });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// 16. Support Tickets / Helpdesk for Staff
+exports.getStaffTickets = async (req, res) => {
+  try {
+    // Return tickets assigned to this employee or general support tickets
+    const tickets = await Ticket.find({
+      $or: [
+        { assignedTo: req.user._id },
+        { assignedTo: { $exists: false } },
+        { assignedTo: null }
+      ]
+    }).sort({ createdAt: -1 });
+    res.json({ success: true, data: tickets });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.replyStaffTicket = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+    if (!message || !message.trim()) {
+      return res.status(400).json({ success: false, message: 'Message cannot be empty' });
+    }
+
+    const ticket = await Ticket.findById(id);
+    if (!ticket) {
+      return res.status(404).json({ success: false, message: 'Ticket not found' });
+    }
+
+    ticket.messages.push({
+      sender: 'support',
+      senderName: req.user.name || 'Sales Support Officer',
+      message: message.trim(),
+      createdAt: new Date()
+    });
+
+    if (ticket.status === 'open') {
+      ticket.status = 'in_progress';
+    }
+
+    await ticket.save();
+    await logActivity(req.user._id, 'Ticket Reply Sent', `Replied to ticket #${ticket.ticketNumber || ticket._id}`);
+    res.json({ success: true, message: 'Reply sent successfully', data: ticket });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

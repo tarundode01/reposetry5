@@ -5,6 +5,7 @@ const { protect } = require('../../middlewares/authMiddleware');
 
 // Public Auth
 router.post('/auth/login', salesController.employeeLogin);
+router.post('/auth/register', salesController.employeeRegister);
 
 // Protected Employee Routes
 router.use(protect);
@@ -47,6 +48,7 @@ router.get('/meetings', salesController.getMeetings);
 
 // Quotations
 router.get('/quotations', salesController.getQuotations);
+router.post('/quotations', salesController.sendQuotationToCustomer);
 
 // Activity Timeline
 router.get('/timeline', salesController.getActivityTimeline);
@@ -54,5 +56,9 @@ router.get('/timeline', salesController.getActivityTimeline);
 // Approvals
 router.get('/approvals', salesController.getApprovals);
 router.post('/approvals', salesController.createApprovalRequest);
+
+// Support & Customer Queries
+router.get('/tickets', salesController.getStaffTickets);
+router.post('/tickets/:id/reply', salesController.replyStaffTicket);
 
 module.exports = router;

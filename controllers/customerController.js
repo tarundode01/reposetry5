@@ -7,6 +7,7 @@ const Invoice = require('../models/Invoice');
 const Enquiry = require('../models/Enquiry');
 const Meeting = require('../models/Meeting');
 const Quotation = require('../models/Quotation');
+const ApprovalRequest = require('../models/ApprovalRequest');
 
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET || 'supersecret_crm_jwt_key_2026', {
@@ -14,7 +15,7 @@ const generateToken = (id) => {
   });
 };
 
-// 1. Auth: Register with Email or Mobile
+// 1. Auth: Register with Email or Mobile (Requires Admin Approval)
 exports.registerCustomer = async (req, res) => {
   try {
     const { name, email, phone, password, company, businessType } = req.body;
@@ -38,12 +39,26 @@ exports.registerCustomer = async (req, res) => {
       password: hashedPassword,
       company: company || '',
       businessType: businessType || 'Individual',
-      role: 'customer'
+      role: 'customer',
+      status: 'pending_approval',
+      isApproved: false
+    });
+
+    // Notify Admin by creating an ApprovalRequest
+    await ApprovalRequest.create({
+      requestType: 'New Customer Registration',
+      requestedBy: user._id,
+      requestedByName: `${user.name} (${user.company || 'Customer'})`,
+      subject: `New Customer Registration: ${user.name}`,
+      description: `New customer account registered for ${user.email} (Phone: ${user.phone || 'N/A'}, Company: ${user.company || 'Individual'}). Awaiting Admin authorization.`,
+      status: 'Pending',
+      targetRole: 'customer'
     });
 
     res.status(201).json({
       success: true,
-      message: 'Account registered successfully',
+      pendingApproval: true,
+      message: 'Account registered successfully! Your account is pending Admin approval. You can login once approved.',
       data: {
         _id: user._id,
         name: user.name,
@@ -51,7 +66,8 @@ exports.registerCustomer = async (req, res) => {
         phone: user.phone,
         company: user.company,
         role: user.role,
-        token: generateToken(user._id)
+        status: user.status,
+        isApproved: false
       }
     });
   } catch (error) {
@@ -59,7 +75,7 @@ exports.registerCustomer = async (req, res) => {
   }
 };
 
-// 2. Auth: Secure Login
+// 2. Auth: Secure Login (Verifies Approval Status)
 exports.loginCustomer = async (req, res) => {
   try {
     const { identifier, email, phone, password } = req.body;
@@ -80,6 +96,22 @@ exports.loginCustomer = async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ success: false, message: 'Invalid credentials. Incorrect password.' });
+    }
+
+    // Check Approval Status
+    if (user.status === 'pending_approval' || user.isApproved === false) {
+      return res.status(403).json({
+        success: false,
+        pendingApproval: true,
+        message: 'Your account is pending Admin approval. Please wait until Admin approves your registration.'
+      });
+    }
+
+    if (user.status === 'suspended' || user.status === 'inactive') {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been deactivated/suspended by Admin. Please contact customer support.'
+      });
     }
 
     res.json({
@@ -228,7 +260,9 @@ exports.updateCustomerProfile = async (req, res) => {
 // 6. Enquiry Management
 exports.getEnquiries = async (req, res) => {
   try {
-    const enquiries = await Enquiry.find({ customerId: req.user._id }).sort({ createdAt: -1 });
+    const enquiries = await Enquiry.find({ customerId: req.user._id })
+      .populate('assignedSalesId', 'name phone email designation')
+      .sort({ createdAt: -1 });
     res.json({ success: true, data: enquiries });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -248,12 +282,20 @@ exports.createEnquiry = async (req, res) => {
       subject,
       description,
       budget: budget || 'Flexible',
-      preferredContactTime: preferredContactTime || 'Anytime'
+      preferredContactTime: preferredContactTime || 'Anytime',
+      status: 'Submitted',
+      assignedSalesId: null,
+      assignedSales: {
+        name: null,
+        phone: null,
+        email: null,
+        designation: null
+      }
     });
 
     res.status(201).json({
       success: true,
-      message: 'Enquiry submitted successfully! Our sales team will connect with you.',
+      message: 'Enquiry submitted successfully! Awaiting Admin review & dedicated consultant assignment.',
       data: enquiry
     });
   } catch (error) {
