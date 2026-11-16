@@ -157,19 +157,42 @@ exports.getDashboardStats = async (req, res) => {
   try {
     const customerId = req.user._id;
 
-    // Enquiries metrics
-    const totalEnquiries = await Enquiry.countDocuments({ customerId });
+    // Match criteria: match by customerId OR customer ObjectId OR email/phone if linked
+    const leadFilter = {
+      $or: [
+        { customerId },
+        { customer: customerId }
+      ]
+    };
+
+    // Enquiries metrics (covers both Assigned and Unassigned leads across all stages)
+    const totalEnquiries = await Enquiry.countDocuments(leadFilter);
+    const assignedEnquiries = await Enquiry.countDocuments({
+      ...leadFilter,
+      $or: [
+        { assignedSalesId: { $ne: null } },
+        { 'assignedSales.name': { $ne: null } }
+      ]
+    });
+    const unassignedEnquiries = await Enquiry.countDocuments({
+      ...leadFilter,
+      assignedSalesId: null,
+      $or: [
+        { assignedSales: null },
+        { 'assignedSales.name': null }
+      ]
+    });
     const pendingEnquiries = await Enquiry.countDocuments({
-      customerId,
-      status: { $in: ['Submitted', 'Received', 'Under Review'] }
+      ...leadFilter,
+      status: { $in: ['Submitted', 'Received', 'Under Review', 'New', 'Open'] }
     });
     const activeEnquiries = await Enquiry.countDocuments({
-      customerId,
-      status: { $in: ['Contacted', 'In Discussion', 'Proposal Sent', 'Negotiation'] }
+      ...leadFilter,
+      status: { $in: ['Assigned', 'Contacted', 'In Discussion', 'Proposal Sent', 'Negotiation', 'Qualified', 'In Progress'] }
     });
     const completedEnquiries = await Enquiry.countDocuments({
-      customerId,
-      status: { $in: ['Converted', 'Closed'] }
+      ...leadFilter,
+      status: { $in: ['Converted', 'Closed', 'Approved'] }
     });
 
     // Tickets
@@ -189,8 +212,11 @@ exports.getDashboardStats = async (req, res) => {
       status: { $in: ['Confirmed', 'Pending Confirmation'] }
     }).sort({ createdAt: -1 }).limit(3);
 
-    // Recent activities
-    const recentEnquiries = await Enquiry.find({ customerId }).sort({ createdAt: -1 }).limit(4);
+    // Recent activities (populate assigned consultant details so customer immediately sees who is assigned)
+    const recentEnquiries = await Enquiry.find(leadFilter)
+      .populate('assignedSalesId', 'name phone email designation avatar')
+      .sort({ createdAt: -1 })
+      .limit(6);
     const recentTickets = await Ticket.find({ customerId }).sort({ createdAt: -1 }).limit(3);
 
     res.json({
@@ -205,6 +231,8 @@ exports.getDashboardStats = async (req, res) => {
         },
         kpis: {
           totalEnquiries,
+          assignedEnquiries,
+          unassignedEnquiries,
           pendingEnquiries,
           activeEnquiries,
           completedEnquiries,
@@ -261,10 +289,31 @@ exports.updateCustomerProfile = async (req, res) => {
 // 6. Enquiry Management
 exports.getEnquiries = async (req, res) => {
   try {
-    const enquiries = await Enquiry.find({ customerId: req.user._id })
-      .populate('assignedSalesId', 'name phone email designation')
+    const customerId = req.user._id;
+    const enquiries = await Enquiry.find({
+      $or: [
+        { customerId },
+        { customer: customerId }
+      ]
+    })
+      .populate('assignedSalesId', 'name phone email designation avatar')
       .sort({ createdAt: -1 });
-    res.json({ success: true, data: enquiries });
+
+    // Sync embedded assignedSales with populated document if assignedSalesId exists
+    const sanitized = enquiries.map(enq => {
+      const doc = enq.toObject();
+      if (doc.assignedSalesId && typeof doc.assignedSalesId === 'object') {
+        doc.assignedSales = {
+          name: doc.assignedSalesId.name || doc.assignedSales?.name,
+          phone: doc.assignedSalesId.phone || doc.assignedSales?.phone,
+          email: doc.assignedSalesId.email || doc.assignedSales?.email,
+          designation: doc.assignedSalesId.designation || doc.assignedSales?.designation
+        };
+      }
+      return doc;
+    });
+
+    res.json({ success: true, data: sanitized });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
