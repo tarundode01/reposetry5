@@ -352,6 +352,7 @@ exports.createLead = async (req, res) => {
 
     const newLead = await Enquiry.create({
       enquiryId,
+      customerId: customer?._id,
       customer: customer?._id,
       productService: productService || 'Custom Software Development',
       subject: subject || `${customerName || 'New'} Project Requirement`,
@@ -360,7 +361,13 @@ exports.createLead = async (req, res) => {
       priority: priority || 'Medium',
       source: source || 'Manual Entry',
       status: 'New',
-      assignedSales: req.user._id,
+      assignedSalesId: req.user._id,
+      assignedSales: {
+        name: req.user.name,
+        phone: req.user.phone,
+        email: req.user.email,
+        designation: req.user.designation || 'Sales Consultant'
+      },
       timeline: [{ step: 'Lead Captured', date: new Date().toLocaleDateString('en-GB'), note: 'Created via mobile' }]
     });
 
