@@ -356,6 +356,11 @@ exports.createLeadAdmin = async (req, res) => {
       budget: budget ? (typeof budget === 'number' ? `₹${budget.toLocaleString('en-IN')}` : String(budget)) : '₹5,00,000',
       productService: productService || service || 'Enterprise Solutions',
       source: source || 'Direct Admin',
+      platformLeadId: req.body.platformLeadId || null,
+      campaign: req.body.campaign || null,
+      isDuplicateFlagged: req.body.isDuplicateFlagged || false,
+      duplicateDismissed: req.body.duplicateDismissed || false,
+      duplicateMatchReason: req.body.duplicateMatchReason || null,
       priority: priority || 'High',
       status: assignedTo ? 'Assigned' : 'New',
       assignedSales: assignedTo || null,
@@ -376,7 +381,7 @@ exports.createLeadAdmin = async (req, res) => {
 exports.updateLeadAdmin = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, priority, budget, notes, productService, subject, source } = req.body;
+    const { status, priority, budget, notes, productService, subject, source, platformLeadId, campaign, isDuplicateFlagged, duplicateDismissed, duplicateMatchReason, duplicateLinkedCustomerId, customerId } = req.body;
     const lead = await Enquiry.findById(id);
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
@@ -386,6 +391,13 @@ exports.updateLeadAdmin = async (req, res) => {
     if (productService) lead.productService = productService;
     if (subject) lead.subject = subject;
     if (source) lead.source = source;
+    if (platformLeadId !== undefined) lead.platformLeadId = platformLeadId;
+    if (campaign !== undefined) lead.campaign = campaign;
+    if (isDuplicateFlagged !== undefined) lead.isDuplicateFlagged = isDuplicateFlagged;
+    if (duplicateDismissed !== undefined) lead.duplicateDismissed = duplicateDismissed;
+    if (duplicateMatchReason !== undefined) lead.duplicateMatchReason = duplicateMatchReason;
+    if (duplicateLinkedCustomerId !== undefined) lead.duplicateLinkedCustomerId = duplicateLinkedCustomerId;
+    if (customerId) lead.customerId = customerId;
 
     if (notes) {
       lead.timeline.push({

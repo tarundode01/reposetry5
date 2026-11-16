@@ -36,7 +36,32 @@ const enquirySchema = new mongoose.Schema({
   },
   source: {
     type: String,
-    default: 'Customer App'
+    default: 'Website'
+  },
+  platformLeadId: {
+    type: String,
+    default: null
+  },
+  campaign: {
+    type: String,
+    default: null
+  },
+  isDuplicateFlagged: {
+    type: Boolean,
+    default: false
+  },
+  duplicateDismissed: {
+    type: Boolean,
+    default: false
+  },
+  duplicateMatchReason: {
+    type: String,
+    default: null
+  },
+  duplicateLinkedCustomerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
   },
   status: {
     type: String,
