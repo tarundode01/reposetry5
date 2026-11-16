@@ -17,7 +17,9 @@ const {
   bookMeeting,
   getQuotations,
   respondQuotation,
-  getInvoices
+  getInvoices,
+  getCustomerNotifications,
+  markCustomerNotificationRead
 } = require('../../controllers/customerController');
 const { protect, authorize } = require('../../middlewares/authMiddleware');
 
@@ -57,5 +59,9 @@ router.post('/quotations/:id/respond', respondQuotation);
 
 // 7. Invoices & Billing
 router.get('/invoices', getInvoices);
+
+// 8. Notifications
+router.get('/notifications', getCustomerNotifications);
+router.put('/notifications/:id/read', markCustomerNotificationRead);
 
 module.exports = router;

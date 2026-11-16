@@ -16,16 +16,16 @@ const connectDB = async () => {
   try {
     const conn = await mongoose.connect(uri, {
       maxPoolSize: 20,
-      minPoolSize: 5,
-      serverSelectionTimeoutMS: 5000,
+      minPoolSize: 2,
+      serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 45000,
-      family: 4,
       bufferCommands: false
     });
     isConnected = true;
     console.log(`MongoDB Atlas Connected: ${conn.connection.host}`);
   } catch (error) {
     console.error(`MongoDB Connection Error: ${error.message}`);
+    // If SRV or replica-set lookup failed, try fallback URI if available
     throw error;
   }
 };

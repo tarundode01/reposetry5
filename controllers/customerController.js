@@ -8,6 +8,7 @@ const Enquiry = require('../models/Enquiry');
 const Meeting = require('../models/Meeting');
 const Quotation = require('../models/Quotation');
 const ApprovalRequest = require('../models/ApprovalRequest');
+const Notification = require('../models/Notification');
 
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET || 'supersecret_crm_jwt_key_2026', {
@@ -271,18 +272,24 @@ exports.getEnquiries = async (req, res) => {
 
 exports.createEnquiry = async (req, res) => {
   try {
-    const { productService, subject, description, budget, preferredContactTime } = req.body;
+    const { productService, subject, description, budget, preferredContactTime, priority } = req.body;
     if (!productService || !subject || !description) {
       return res.status(400).json({ success: false, message: 'Service, Subject, and Description are required' });
     }
 
+    const enquiryCount = await Enquiry.countDocuments();
+    const enquiryId = `ENQ-${1000 + enquiryCount + 1}`;
+
     const enquiry = await Enquiry.create({
       customerId: req.user._id,
+      enquiryId,
       productService,
       subject,
       description,
       budget: budget || 'Flexible',
       preferredContactTime: preferredContactTime || 'Anytime',
+      priority: priority || 'Medium',
+      source: 'Customer App',
       status: 'Submitted',
       assignedSalesId: null,
       assignedSales: {
@@ -290,13 +297,42 @@ exports.createEnquiry = async (req, res) => {
         phone: null,
         email: null,
         designation: null
-      }
+      },
+      timeline: [
+        {
+          step: 'Requirement Submitted',
+          title: 'Submitted by Customer',
+          date: new Date().toLocaleDateString('en-GB'),
+          note: `Customer submitted request for ${productService}. Awaiting Admin lead dispatch.`,
+          timestamp: new Date()
+        }
+      ]
     });
+
+    const populatedEnquiry = await Enquiry.findById(enquiry._id)
+      .populate('customerId', 'name email phone company businessType designation gstNumber avatar')
+      .populate('assignedSalesId', 'name email phone designation avatar');
+
+    // Notify Admin of new Project Enquiry
+    try {
+      await Notification.create({
+        recipientRole: 'admin',
+        customerId: req.user._id,
+        title: `🚀 New Project Enquiry: ${productService}`,
+        message: `${req.user.name || 'Client'} has submitted a new project enquiry "${subject}" (Budget: ${budget || 'Flexible'}).`,
+        type: 'enquiry',
+        senderName: req.user.name,
+        senderRole: 'customer',
+        linkId: enquiry._id.toString()
+      });
+    } catch (notifErr) {
+      console.error('Error creating enquiry notification:', notifErr.message);
+    }
 
     res.status(201).json({
       success: true,
       message: 'Enquiry submitted successfully! Awaiting Admin review & dedicated consultant assignment.',
-      data: enquiry
+      data: populatedEnquiry
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -342,8 +378,20 @@ exports.createTicket = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Subject and description are required' });
     }
 
+    // Auto-link assigned sales employee if this customer has an assigned lead/enquiry
+    let assignedStaff = null;
+    const latestEnquiry = await Enquiry.findOne({
+      customerId: req.user._id,
+      assignedSalesId: { $ne: null }
+    }).sort({ updatedAt: -1 });
+
+    if (latestEnquiry && latestEnquiry.assignedSalesId) {
+      assignedStaff = latestEnquiry.assignedSalesId;
+    }
+
     const ticket = await Ticket.create({
       customerId: req.user._id,
+      assignedTo: assignedStaff,
       subject,
       category: category || 'Technical',
       priority: priority || 'medium',
@@ -352,10 +400,27 @@ exports.createTicket = async (req, res) => {
         {
           sender: 'customer',
           senderName: req.user.name,
-          message: description
+          message: description,
+          createdAt: new Date()
         }
       ]
     });
+
+    // Notify Admin of new Ticket
+    try {
+      await Notification.create({
+        recipientRole: 'admin',
+        customerId: req.user._id,
+        title: `🎫 New Support Ticket: ${ticket.ticketNumber || ticket.subject}`,
+        message: `${req.user.name || 'Client'} raised a new ticket "${subject}" [${category || 'General'}].`,
+        type: 'ticket',
+        senderName: req.user.name,
+        senderRole: 'customer',
+        linkId: ticket._id.toString()
+      });
+    } catch (nErr) {
+      console.error('Error creating ticket notification:', nErr.message);
+    }
 
     res.status(201).json({ success: true, message: 'Support Ticket Raised!', data: ticket });
   } catch (error) {
@@ -373,12 +438,30 @@ exports.replyTicket = async (req, res) => {
     ticket.messages.push({
       sender: 'customer',
       senderName: req.user.name,
-      message
+      message,
+      createdAt: new Date()
     });
     if (['resolved', 'closed'].includes(ticket.status)) {
       ticket.status = 'in_progress';
     }
     await ticket.save();
+
+    // Notify Admin of new Client Message
+    try {
+      await Notification.create({
+        recipientRole: 'admin',
+        customerId: req.user._id,
+        title: `💬 New Client Message on Ticket ${ticket.ticketNumber || ticket.subject}`,
+        message: `${req.user.name || 'Client'}: "${message.length > 60 ? message.substring(0, 60) + '...' : message}"`,
+        type: 'chat',
+        senderName: req.user.name,
+        senderRole: 'customer',
+        linkId: ticket._id.toString()
+      });
+    } catch (nErr) {
+      console.error('Error creating reply notification:', nErr.message);
+    }
+
     res.json({ success: true, message: 'Message sent', data: ticket });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -406,6 +489,23 @@ exports.bookMeeting = async (req, res) => {
       timeSlot,
       notes
     });
+
+    // Notify Admin of new Meeting Booking
+    try {
+      await Notification.create({
+        recipientRole: 'admin',
+        customerId: req.user._id,
+        title: `📅 New Meeting Booked: ${subject || 'Consultation'}`,
+        message: `${req.user.name || 'Client'} requested a ${meetingType || 'call'} on ${preferredDate} at ${timeSlot}.`,
+        type: 'meeting',
+        senderName: req.user.name,
+        senderRole: 'customer',
+        linkId: meeting._id.toString()
+      });
+    } catch (nErr) {
+      console.error('Error creating meeting notification:', nErr.message);
+    }
+
     res.status(201).json({ success: true, message: 'Meeting scheduled successfully!', data: meeting });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -431,6 +531,23 @@ exports.respondQuotation = async (req, res) => {
     }
     quotation.status = status;
     await quotation.save();
+
+    // Notify Admin of Quotation Response
+    try {
+      await Notification.create({
+        recipientRole: 'admin',
+        customerId: req.user._id,
+        title: `💰 Quotation ${quotation.quotationNumber || 'Response'}: ${status}`,
+        message: `${req.user.name || 'Client'} has responded with "${status}" on quotation for ${quotation.title || 'Project'}.`,
+        type: 'quotation',
+        senderName: req.user.name,
+        senderRole: 'customer',
+        linkId: quotation._id.toString()
+      });
+    } catch (nErr) {
+      console.error('Error creating quotation notification:', nErr.message);
+    }
+
     res.json({ success: true, message: `Quotation status updated to ${status}`, data: quotation });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -441,6 +558,57 @@ exports.getInvoices = async (req, res) => {
   try {
     const invoices = await Invoice.find({ customerId: req.user._id }).sort({ createdAt: -1 });
     res.json({ success: true, data: invoices });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// 10. Customer Notifications
+exports.getCustomerNotifications = async (req, res) => {
+  try {
+    const notifications = await Notification.find({
+      $or: [
+        { customerId: req.user._id },
+        { userId: req.user._id },
+        { recipientRole: 'customer' }
+      ]
+    })
+      .sort({ createdAt: -1 })
+      .limit(40);
+
+    const unreadCount = await Notification.countDocuments({
+      $or: [
+        { customerId: req.user._id },
+        { userId: req.user._id },
+        { recipientRole: 'customer' }
+      ],
+      read: false
+    });
+
+    res.json({ success: true, data: notifications, unreadCount });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.markCustomerNotificationRead = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (id === 'all') {
+      await Notification.updateMany(
+        {
+          $or: [
+            { customerId: req.user._id },
+            { userId: req.user._id },
+            { recipientRole: 'customer' }
+          ]
+        },
+        { $set: { read: true } }
+      );
+      return res.json({ success: true, message: 'All notifications marked as read' });
+    }
+    const notif = await Notification.findByIdAndUpdate(id, { read: true }, { new: true });
+    res.json({ success: true, data: notif });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

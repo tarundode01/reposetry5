@@ -197,7 +197,11 @@ exports.getEmployeeDashboard = async (req, res) => {
       recentTimeline
     ] = await Promise.all([
       Enquiry.find({
-        $or: [{ assignedSalesId: empId }, { assignedSales: empId }]
+        $or: [
+          { assignedSalesId: empId },
+          { assignedSales: empId },
+          { 'assignedSales.email': req.user.email }
+        ]
       }).sort({ createdAt: -1 }),
       Deal.find({ assignedTo: empId }).sort({ createdAt: -1 }),
       Task.find({ assignedTo: empId }).sort({ dueDate: 1 }),
@@ -264,7 +268,11 @@ exports.getLeads = async (req, res) => {
 
     // Strictly isolate by assigned employee (SaaS Multi-tenant employee data guard)
     let query = {
-      $or: [{ assignedSalesId: empId }, { assignedSales: empId }]
+      $or: [
+        { assignedSalesId: empId },
+        { assignedSales: empId },
+        { 'assignedSales.email': req.user.email }
+      ]
     };
 
     if (status && status !== 'All') query.status = status;
@@ -273,7 +281,13 @@ exports.getLeads = async (req, res) => {
     if (search) {
       query = {
         $and: [
-          { $or: [{ assignedSalesId: empId }, { assignedSales: empId }] },
+          {
+            $or: [
+              { assignedSalesId: empId },
+              { assignedSales: empId },
+              { 'assignedSales.email': req.user.email }
+            ]
+          },
           {
             $or: [
               { subject: { $regex: search, $options: 'i' } },
@@ -363,8 +377,24 @@ exports.updateLeadStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { status, notes, priority } = req.body;
-    const lead = await Enquiry.findById(id);
-    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+    const empId = req.user._id;
+
+    // Strict Ownership Check: Only the assigned sales employee (or admin) can manage this lead
+    const lead = await Enquiry.findOne({
+      _id: id,
+      $or: [
+        { assignedSalesId: empId },
+        { assignedSales: empId },
+        { 'assignedSales.email': req.user.email }
+      ]
+    });
+
+    if (!lead) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access Denied: This lead is either unassigned or assigned to another sales executive.'
+      });
+    }
 
     if (status) lead.status = status;
     if (priority) lead.priority = priority;
@@ -378,6 +408,35 @@ exports.updateLeadStatus = async (req, res) => {
 
     await lead.save();
     await logActivity(req.user._id, 'Lead Updated', `Updated lead ${lead.enquiryId} to ${status || lead.status}`);
+
+    // Notify Customer and Admin
+    try {
+      if (lead.customerId) {
+        await Notification.create({
+          recipientRole: 'customer',
+          userId: lead.customerId,
+          customerId: lead.customerId,
+          title: `🔄 Project Update: ${lead.productService || lead.subject}`,
+          message: `Your project enquiry has been updated to "${status || lead.status}". Note: ${notes || 'Status updated by executive.'}`,
+          type: 'enquiry',
+          senderName: req.user.name,
+          senderRole: 'employee',
+          linkId: lead._id.toString()
+        });
+      }
+      await Notification.create({
+        recipientRole: 'admin',
+        customerId: lead.customerId,
+        title: `🔄 Lead Status Updated: ${lead.enquiryId || lead.subject}`,
+        message: `Employee ${req.user.name} changed status to "${status || lead.status}".`,
+        type: 'enquiry',
+        senderName: req.user.name,
+        senderRole: 'employee',
+        linkId: lead._id.toString()
+      });
+    } catch (nErr) {
+      console.error('Error creating lead status notification:', nErr.message);
+    }
 
     res.json({ success: true, message: 'Lead updated', data: lead });
   } catch (error) {
@@ -653,6 +712,33 @@ exports.sendQuotationToCustomer = async (req, res) => {
 
     await logActivity(req.user._id, 'Quotation Sent', `Sent quotation ${quotationNumber} to customer`, `Amount: ₹${totalAmount}`);
 
+    // Notify Customer and Admin
+    try {
+      await Notification.create({
+        recipientRole: 'customer',
+        userId: customerId,
+        customerId: customerId,
+        title: `📜 Commercial Proposal Received: ${quotationNumber}`,
+        message: `Your dedicated sales executive has sent quotation for "${title}" of ₹${Number(totalAmount).toLocaleString()}. Please review and respond.`,
+        type: 'quotation',
+        senderName: req.user.name,
+        senderRole: 'employee',
+        linkId: quotation._id.toString()
+      });
+      await Notification.create({
+        recipientRole: 'admin',
+        customerId: customerId,
+        title: `📤 Quotation Dispatched: ${quotationNumber}`,
+        message: `Employee ${req.user.name} sent quotation of ₹${Number(totalAmount).toLocaleString()} for "${title}".`,
+        type: 'quotation',
+        senderName: req.user.name,
+        senderRole: 'employee',
+        linkId: quotation._id.toString()
+      });
+    } catch (nErr) {
+      console.error('Error creating quotation notification:', nErr.message);
+    }
+
     res.status(201).json({
       success: true,
       message: `Commercial proposal & quotation ${quotationNumber} dispatched to customer successfully!`,
@@ -703,14 +789,20 @@ exports.createApprovalRequest = async (req, res) => {
 // 16. Support Tickets / Helpdesk for Staff
 exports.getStaffTickets = async (req, res) => {
   try {
-    // Return tickets assigned to this employee or general support tickets
+    // 1. Find all customers who have leads/enquiries assigned to this staff member
+    const myEnquiries = await Enquiry.find({ assignedSalesId: req.user._id }).select('customerId');
+    const myCustomerIds = myEnquiries.map(e => e.customerId).filter(Boolean);
+
+    // 2. Return tickets explicitly assigned to this staff member OR from their assigned customers OR general tickets
     const tickets = await Ticket.find({
       $or: [
         { assignedTo: req.user._id },
+        { customerId: { $in: myCustomerIds } },
         { assignedTo: { $exists: false } },
         { assignedTo: null }
       ]
-    }).sort({ createdAt: -1 });
+    }).populate('customerId', 'name company email phone').sort({ createdAt: -1 });
+
     res.json({ success: true, data: tickets });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -743,7 +835,87 @@ exports.replyStaffTicket = async (req, res) => {
 
     await ticket.save();
     await logActivity(req.user._id, 'Ticket Reply Sent', `Replied to ticket #${ticket.ticketNumber || ticket._id}`);
+
+    // Notify Customer and Admin
+    try {
+      if (ticket.customerId) {
+        await Notification.create({
+          recipientRole: 'customer',
+          userId: ticket.customerId,
+          customerId: ticket.customerId,
+          title: `💬 Support Reply from ${req.user.name}`,
+          message: `${req.user.name}: "${message.length > 60 ? message.substring(0, 60) + '...' : message}"`,
+          type: 'chat',
+          senderName: req.user.name,
+          senderRole: 'employee',
+          linkId: ticket._id.toString()
+        });
+      }
+      await Notification.create({
+        recipientRole: 'admin',
+        title: `💬 Staff Reply on Ticket ${ticket.ticketNumber || ticket.subject}`,
+        message: `${req.user.name} replied to ticket: "${message.length > 60 ? message.substring(0, 60) + '...' : message}"`,
+        type: 'chat',
+        senderName: req.user.name,
+        senderRole: 'employee',
+        linkId: ticket._id.toString()
+      });
+    } catch (nErr) {
+      console.error('Error creating ticket reply notification:', nErr.message);
+    }
+
     res.json({ success: true, message: 'Reply sent successfully', data: ticket });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// 17. Employee Notifications
+exports.getStaffNotifications = async (req, res) => {
+  try {
+    const notifications = await Notification.find({
+      $or: [
+        { recipientRole: 'employee' },
+        { recipientRole: 'all' },
+        { userId: req.user._id }
+      ]
+    })
+      .sort({ createdAt: -1 })
+      .limit(40);
+
+    const unreadCount = await Notification.countDocuments({
+      $or: [
+        { recipientRole: 'employee' },
+        { recipientRole: 'all' },
+        { userId: req.user._id }
+      ],
+      read: false
+    });
+
+    res.json({ success: true, data: notifications, unreadCount });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.markStaffNotificationRead = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (id === 'all') {
+      await Notification.updateMany(
+        {
+          $or: [
+            { recipientRole: 'employee' },
+            { recipientRole: 'all' },
+            { userId: req.user._id }
+          ]
+        },
+        { $set: { read: true } }
+      );
+      return res.json({ success: true, message: 'All notifications marked as read' });
+    }
+    const notif = await Notification.findByIdAndUpdate(id, { read: true }, { new: true });
+    res.json({ success: true, data: notif });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

@@ -61,4 +61,8 @@ router.post('/approvals', salesController.createApprovalRequest);
 router.get('/tickets', salesController.getStaffTickets);
 router.post('/tickets/:id/reply', salesController.replyStaffTicket);
 
+// Notifications & Realtime Alerts
+router.get('/notifications', salesController.getStaffNotifications);
+router.put('/notifications/:id/read', salesController.markStaffNotificationRead);
+
 module.exports = router;
