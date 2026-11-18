@@ -633,9 +633,24 @@ exports.getAllTickets = async (req, res) => {
   try {
     const tickets = await Ticket.find({})
       .populate('customerId', 'name company email phone')
-      .populate('assignedTo', 'name email phone designation')
+      .populate('assignedTo', 'name email phone designation department')
       .sort({ createdAt: -1 });
-    res.json({ success: true, data: tickets });
+
+    // Also enrich tickets with enquiry-assigned sales employee if assignedTo is not explicitly populated on ticket
+    const Enq = require('../models/Enquiry');
+    const enrichedTickets = await Promise.all(tickets.map(async (t) => {
+      const tObj = t.toObject();
+      if (!tObj.assignedTo && tObj.customerId?._id) {
+        const enq = await Enq.findOne({ customerId: tObj.customerId._id, assignedSalesId: { $ne: null } })
+          .populate('assignedSalesId', 'name email phone designation department');
+        if (enq && enq.assignedSalesId) {
+          tObj.assignedTo = enq.assignedSalesId;
+        }
+      }
+      return tObj;
+    }));
+
+    res.json({ success: true, data: enrichedTickets });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
