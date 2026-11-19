@@ -564,7 +564,17 @@ exports.bookMeeting = async (req, res) => {
 // 9. Quotations & Billing
 exports.getQuotations = async (req, res) => {
   try {
-    const quotations = await Quotation.find({ customerId: req.user._id }).sort({ createdAt: -1 });
+    const user = req.user;
+    // Match by direct customerId OR linked user email / phone / enquiry
+    const quotations = await Quotation.find({
+      $or: [
+        { customerId: user._id },
+        { 'customerId.email': user.email },
+        { 'customerId.phone': user.phone },
+        { 'customerId._id': user._id }
+      ]
+    }).sort({ createdAt: -1 });
+
     res.json({ success: true, data: quotations });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

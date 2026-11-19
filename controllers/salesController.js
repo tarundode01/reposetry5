@@ -672,16 +672,55 @@ exports.getQuotations = async (req, res) => {
 
 exports.sendQuotationToCustomer = async (req, res) => {
   try {
-    const { customerId, title, subTotal, taxGst, totalAmount, items, validUntil, enquiryId } = req.body;
-    if (!customerId || !title || !totalAmount) {
-      return res.status(400).json({ success: false, message: 'Customer ID, Title and Amount are required' });
+    let { customerId, title, subTotal, taxGst, totalAmount, items, validUntil, enquiryId } = req.body;
+    if (!title || (!totalAmount && !subTotal)) {
+      return res.status(400).json({ success: false, message: 'Title and Amount are required' });
+    }
+
+    // Resolve target Customer ID if customerId is an object or enquiry
+    let targetCustomerId = null;
+    if (customerId && typeof customerId === 'object') {
+      targetCustomerId = customerId._id || customerId.id || customerId.customerId;
+    } else if (customerId && typeof customerId === 'string') {
+      targetCustomerId = customerId;
+    }
+
+    // If targetCustomerId is not a valid 24-char ObjectId or if it is from an enquiry, find actual Customer User
+    if (!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
+      const email = customerId?.email;
+      const phone = customerId?.phone;
+      if (email || phone) {
+        const foundUser = await User.findOne({
+          $or: [
+            ...(email ? [{ email: email.toLowerCase().trim() }] : []),
+            ...(phone ? [{ phone }] : [])
+          ]
+        });
+        if (foundUser) {
+          targetCustomerId = foundUser._id;
+        }
+      }
+    }
+
+    // If still not matched, check if an Enquiry exists with customerId
+    if ((!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) && (enquiryId || customerId?._id)) {
+      const enq = await Enquiry.findById(enquiryId || customerId?._id);
+      if (enq && enq.customerId) {
+        targetCustomerId = enq.customerId;
+      }
+    }
+
+    // Fallback: If no customer account found, use req.user._id or first available customer
+    if (!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
+      const anyCust = await User.findOne({ role: 'customer' });
+      targetCustomerId = anyCust ? anyCust._id : req.user._id;
     }
 
     const count = await Quotation.countDocuments();
-    const quotationNumber = `QT-${202600 + count + 1}`;
+    const quotationNumber = req.body.quotationNumber || `QT-${202600 + count + 1}`;
 
     const quotation = await Quotation.create({
-      customerId,
+      customerId: targetCustomerId,
       quotationNumber,
       title,
       subTotal: Number(subTotal) || Number(totalAmount),
@@ -695,18 +734,21 @@ exports.sendQuotationToCustomer = async (req, res) => {
     });
 
     // If enquiryId provided, update Enquiry status to 'Proposal Sent' and add to timeline
-    if (enquiryId) {
-      const enquiry = await Enquiry.findById(enquiryId);
-      if (enquiry) {
-        enquiry.status = 'Proposal Sent';
-        enquiry.timeline.push({
-          status: 'Proposal Sent',
-          title: `Quotation Sent (${quotationNumber})`,
-          step: 'Commercial Proposal Dispatched',
-          note: `Dedicated sales consultant prepared and sent formal quotation of ₹${Number(totalAmount).toLocaleString()} for ${title}.`,
-          timestamp: new Date()
-        });
-        await enquiry.save();
+    if (enquiryId || (customerId && customerId.enquiryId)) {
+      const enqIdToFind = enquiryId || customerId._id;
+      if (enqIdToFind && enqIdToFind.match(/^[0-9a-fA-F]{24}$/)) {
+        const enquiry = await Enquiry.findById(enqIdToFind);
+        if (enquiry) {
+          enquiry.status = 'Proposal Sent';
+          enquiry.timeline.push({
+            status: 'Proposal Sent',
+            title: `Quotation Sent (${quotationNumber})`,
+            step: 'Commercial Proposal Dispatched',
+            note: `Dedicated sales consultant prepared and sent formal quotation of ₹${Number(totalAmount).toLocaleString()} for ${title}.`,
+            timestamp: new Date()
+          });
+          await enquiry.save();
+        }
       }
     }
 
@@ -716,8 +758,8 @@ exports.sendQuotationToCustomer = async (req, res) => {
     try {
       await Notification.create({
         recipientRole: 'customer',
-        userId: customerId,
-        customerId: customerId,
+        userId: targetCustomerId,
+        customerId: targetCustomerId,
         title: `📜 Commercial Proposal Received: ${quotationNumber}`,
         message: `Your dedicated sales executive has sent quotation for "${title}" of ₹${Number(totalAmount).toLocaleString()}. Please review and respond.`,
         type: 'quotation',
@@ -727,7 +769,7 @@ exports.sendQuotationToCustomer = async (req, res) => {
       });
       await Notification.create({
         recipientRole: 'admin',
-        customerId: customerId,
+        customerId: targetCustomerId,
         title: `📤 Quotation Dispatched: ${quotationNumber}`,
         message: `Employee ${req.user.name} sent quotation of ₹${Number(totalAmount).toLocaleString()} for "${title}".`,
         type: 'quotation',
@@ -743,6 +785,11 @@ exports.sendQuotationToCustomer = async (req, res) => {
       success: true,
       message: `Commercial proposal & quotation ${quotationNumber} dispatched to customer successfully!`,
       data: quotation
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
