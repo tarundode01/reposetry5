@@ -17,6 +17,7 @@ const {
   bookMeeting,
   getQuotations,
   respondQuotation,
+  getQuotationPdf,
   getInvoices,
   getCustomerNotifications,
   markCustomerNotificationRead
@@ -27,6 +28,9 @@ const { protect, authorize } = require('../../middlewares/authMiddleware');
 router.post('/auth/register', registerCustomer);
 router.post('/auth/login', loginCustomer);
 router.post('/auth/send-otp', sendOtp);
+
+// Public View & Download Quotation Proforma PDF
+router.get('/quotations/:id/pdf', getQuotationPdf);
 
 // Protected Customer APIs
 router.use(protect);

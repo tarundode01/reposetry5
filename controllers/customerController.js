@@ -565,13 +565,27 @@ exports.bookMeeting = async (req, res) => {
 exports.getQuotations = async (req, res) => {
   try {
     const user = req.user;
-    // Match by direct customerId OR linked user email / phone / enquiry
+    
+    // Find all enquiries belonging to this user
+    const userEnquiries = await Enquiry.find({
+      $or: [
+        { customerId: user._id },
+        { customer: user._id }
+      ]
+    }).select('_id');
+    const enquiryIds = userEnquiries.map(e => e._id);
+
+    // Match criteria:
+    // 1. Direct customerId matching user._id
+    // 2. customerId populated or linked by email or phone
+    // 3. Or linked through customer's enquiries
     const quotations = await Quotation.find({
       $or: [
         { customerId: user._id },
+        { 'customerId._id': user._id },
         { 'customerId.email': user.email },
         { 'customerId.phone': user.phone },
-        { 'customerId._id': user._id }
+        ...(enquiryIds.length > 0 ? [{ customerId: { $in: enquiryIds } }] : [])
       ]
     }).sort({ createdAt: -1 });
 
@@ -747,6 +761,131 @@ exports.respondQuotation = async (req, res) => {
   } catch (error) {
     console.error('respondQuotation error:', error);
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Public / Direct View Official Quotation & Proforma Document
+exports.getQuotationPdf = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isId = id.match(/^[0-9a-fA-F]{24}$/);
+    const quotation = await Quotation.findOne({
+      $or: [
+        ...(isId ? [{ _id: id }] : []),
+        { quotationNumber: id }
+      ]
+    }).populate('customerId', 'name company email phone address');
+
+    if (!quotation) {
+      return res.status(404).send('<h1>Quotation Document Not Found</h1>');
+    }
+
+    const itemsRows = (quotation.items || []).map((it, idx) => `
+      <tr style="border-bottom: 1px solid #E2E8F0;">
+        <td style="padding: 10px; font-weight: bold; color: #1E293B;">${idx + 1}</td>
+        <td style="padding: 10px; color: #1E293B;">
+          <div style="font-weight: 800;">${it.name || quotation.title}</div>
+          <div style="font-size: 11px; color: #64748B;">Official commercial deliverables & architecture module</div>
+        </td>
+        <td style="padding: 10px; text-align: center; color: #1E293B;">${it.qty || 1}</td>
+        <td style="padding: 10px; text-align: right; color: #1E293B;">₹${Number(it.rate || it.amount || 0).toLocaleString()}</td>
+        <td style="padding: 10px; text-align: right; font-weight: 800; color: #047857;">₹${Number(it.amount || ((it.qty || 1) * (it.rate || 0))).toLocaleString()}</td>
+      </tr>
+    `).join('');
+
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Quotation #${quotation.quotationNumber}</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #F8FAFC; margin: 0; padding: 24px; color: #0F172A; }
+          .container { max-width: 800px; margin: 0 auto; background: #FFFFFF; border-radius: 16px; border: 1.5px solid #CBD5E1; padding: 32px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+          .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #E2E8F0; padding-bottom: 18px; margin-bottom: 20px; }
+          .badge { background: #EEF2FF; color: #4338CA; padding: 4px 12px; border-radius: 20px; font-weight: 800; font-size: 12px; }
+          .table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+          .th { background: #F1F5F9; padding: 10px; text-align: left; font-size: 12px; font-weight: 800; color: #475569; text-transform: uppercase; }
+          .totals { margin-top: 20px; float: right; width: 300px; }
+          .total-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 13px; }
+          .grand-total { border-top: 2px solid #059669; padding-top: 8px; font-size: 18px; font-weight: 900; color: #047857; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div>
+              <span class="badge">OFFICIAL PROFORMA PROPOSAL</span>
+              <h1 style="margin: 6px 0 0 0; font-size: 24px; color: #1E1B4B;">Commercial Quotation</h1>
+              <p style="margin: 2px 0 0 0; color: #64748B; font-weight: 700; font-size: 13px;">Document #${quotation.quotationNumber}</p>
+            </div>
+            <div style="text-align: right;">
+              <h2 style="margin: 0; color: #4338CA; font-size: 20px;">OMNICRM ENTERPRISE</h2>
+              <p style="margin: 2px 0 0 0; font-size: 11px; color: #64748B;">Cloud Corporate Solutions</p>
+            </div>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; margin-bottom: 24px;">
+            <div>
+              <p style="font-size: 11px; font-weight: 800; color: #64748B; margin: 0 0 4px 0; text-transform: uppercase;">PROPOSAL PREPARED FOR:</p>
+              <h3 style="margin: 0; color: #1E1B4B; font-size: 16px;">${quotation.customerId?.name || 'Valued Corporate Client'}</h3>
+              <p style="margin: 2px 0 0 0; color: #475569; font-size: 13px;">${quotation.customerId?.company || 'Enterprise Account'}</p>
+              <p style="margin: 2px 0 0 0; color: #64748B; font-size: 12px;">${quotation.customerId?.email || ''} | ${quotation.customerId?.phone || ''}</p>
+            </div>
+            <div style="text-align: right;">
+              <p style="font-size: 11px; font-weight: 800; color: #64748B; margin: 0 0 4px 0; text-transform: uppercase;">DETAILS:</p>
+              <p style="margin: 0; font-size: 12px; color: #475569;">Date: <strong>${new Date(quotation.createdAt).toLocaleDateString()}</strong></p>
+              <p style="margin: 2px 0 0 0; font-size: 12px; color: #475569;">Valid Until: <strong>${quotation.validUntil ? new Date(quotation.validUntil).toLocaleDateString() : '30 Days'}</strong></p>
+              <p style="margin: 2px 0 0 0; font-size: 12px; color: #059669; font-weight: 800;">Status: ${quotation.status || 'Received'}</p>
+            </div>
+          </div>
+
+          <h3 style="color: #1E1B4B; margin: 16px 0 8px 0; font-size: 15px;">Scope: ${quotation.title}</h3>
+
+          <table class="table">
+            <thead>
+              <tr>
+                <th class="th" style="width: 40px;">#</th>
+                <th class="th">Item / Description</th>
+                <th class="th" style="text-align: center; width: 60px;">Qty</th>
+                <th class="th" style="text-align: right; width: 110px;">Rate (₹)</th>
+                <th class="th" style="text-align: right; width: 120px;">Amount (₹)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${itemsRows}
+            </tbody>
+          </table>
+
+          <div style="overflow: hidden;">
+            <div class="totals">
+              <div class="total-row">
+                <span style="color: #64748B;">Gross Subtotal:</span>
+                <span style="font-weight: 800;">₹${Number(quotation.subTotal || quotation.totalAmount || 0).toLocaleString()}</span>
+              </div>
+              <div class="total-row">
+                <span style="color: #64748B;">GST / Applicable Tax:</span>
+                <span style="font-weight: 800; color: #059669;">+ ₹${Number(quotation.taxGst || 0).toLocaleString()}</span>
+              </div>
+              <div class="total-row grand-total">
+                <span>Net Total:</span>
+                <span>₹${Number(quotation.totalAmount || quotation.subTotal || 0).toLocaleString()}</span>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top: 48px; border-top: 1.5px dashed #CBD5E1; padding-top: 16px; display: flex; justify-content: space-between; align-items: center;">
+            <p style="font-size: 11px; color: #94A3B8; margin: 0;">This is a system generated proforma quotation. Delivered securely via OmniCRM.</p>
+            <button onclick="window.print()" style="background: #4338CA; color: #FFFFFF; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 800; cursor: pointer;">🖨️ Print / Save as PDF</button>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    res.send(htmlContent);
+  } catch (err) {
+    res.status(500).send('Error generating document');
   }
 };
 
