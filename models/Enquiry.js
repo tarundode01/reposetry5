@@ -94,7 +94,12 @@ const enquirySchema = new mongoose.Schema({
     name: { type: String, default: null },
     phone: { type: String, default: null },
     email: { type: String, default: null },
-    designation: { type: String, default: null }
+    designation: { type: String, default: null },
+    assignedAt: { type: Date, default: null }
+  },
+  assignedAt: {
+    type: Date,
+    default: null
   },
   timeline: [
     {

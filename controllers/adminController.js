@@ -262,22 +262,25 @@ exports.assignLead = async (req, res) => {
       if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
     }
 
+    const now = new Date();
     lead.assignedSalesId = emp ? emp._id : null;
     lead.assignedSales = {
       name: emp ? emp.name : null,
       phone: emp ? emp.phone : null,
       email: emp ? emp.email : null,
-      designation: emp ? (emp.designation || 'Sales Consultant') : null
+      designation: emp ? (emp.designation || 'Sales Consultant') : null,
+      assignedAt: emp ? now : null
     };
+    lead.assignedAt = emp ? now : null;
     lead.status = emp ? 'Assigned' : 'Submitted';
 
     lead.timeline.push({
       status: lead.status,
       title: emp ? `Assigned to ${emp.name}` : 'Unassigned',
       step: emp ? `Assigned to ${emp.name}` : 'Unassigned',
-      date: new Date().toLocaleDateString('en-GB'),
-      note: emp ? `Admin designated ${emp.name} (${emp.phone || emp.email}) as the dedicated sales consultant.` : 'Unassigned by Admin',
-      timestamp: new Date()
+      date: now.toLocaleDateString('en-GB'),
+      note: emp ? `Admin designated ${emp.name} (${emp.phone || emp.email}) as the dedicated sales consultant on ${now.toLocaleDateString('en-GB')} at ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}.` : 'Unassigned by Admin',
+      timestamp: now
     });
 
     await lead.save();
@@ -302,7 +305,7 @@ exports.assignLead = async (req, res) => {
           userId: lead.customerId,
           customerId: lead.customerId,
           title: `🤝 Dedicated Consultant Assigned!`,
-          message: emp 
+          message: emp
             ? `${emp.name} has been assigned as your dedicated manager for "${lead.productService || lead.subject}".`
             : `Your project enquiry is under review.`,
           type: 'enquiry',
@@ -324,7 +327,7 @@ exports.assignLead = async (req, res) => {
 exports.createLeadAdmin = async (req, res) => {
   try {
     const { customerName, name, phone, email, subject, budget, productService, service, source, priority, assignedTo, notes } = req.body;
-    
+
     // Find or create customer account so enquiry always links to a customerId
     const clientName = customerName || name || 'Prospective Client';
     const clientEmail = email ? email.toLowerCase().trim() : `lead_${Date.now()}@prospect.crm`;
@@ -611,8 +614,8 @@ exports.updateApproval = async (req, res) => {
 
     // If this is a New Customer or Employee Registration, update the user account status in database
     if (
-      (approval.requestType === 'New Employee Registration' || 
-       approval.requestType === 'New Customer Registration') && 
+      (approval.requestType === 'New Employee Registration' ||
+        approval.requestType === 'New Customer Registration') &&
       approval.requestedBy
     ) {
       const isApproved = status === 'Approved';
