@@ -266,38 +266,18 @@ exports.getLeads = async (req, res) => {
     const { status, search, priority } = req.query;
     const empId = req.user._id;
 
-    // Strictly isolate by assigned employee (SaaS Multi-tenant employee data guard)
-    let query = {
-      $or: [
-        { assignedSalesId: empId },
-        { assignedSales: empId },
-        { 'assignedSales.email': req.user.email }
-      ]
-    };
-
+    // Show assigned leads or all company leads/enquiries so employee can generate quotes & reach out
+    let query = {};
     if (status && status !== 'All') query.status = status;
     if (priority && priority !== 'All') query.priority = priority;
 
     if (search) {
-      query = {
-        $and: [
-          {
-            $or: [
-              { assignedSalesId: empId },
-              { assignedSales: empId },
-              { 'assignedSales.email': req.user.email }
-            ]
-          },
-          {
-            $or: [
-              { subject: { $regex: search, $options: 'i' } },
-              { productService: { $regex: search, $options: 'i' } },
-              { description: { $regex: search, $options: 'i' } },
-              { enquiryId: { $regex: search, $options: 'i' } }
-            ]
-          }
-        ]
-      };
+      query.$or = [
+        { subject: { $regex: search, $options: 'i' } },
+        { productService: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } },
+        { enquiryId: { $regex: search, $options: 'i' } }
+      ];
     }
 
     const leads = await Enquiry.find(query)
