@@ -670,7 +670,9 @@ exports.getMeetings = async (req, res) => {
 // 13. Quotations Management (Get & Send Quotation to Customer)
 exports.getQuotations = async (req, res) => {
   try {
-    const quotations = await Quotation.find({}).sort({ createdAt: -1 });
+    const quotations = await Quotation.find({})
+      .populate('customerId', 'name customerName company email phone address avatar')
+      .sort({ createdAt: -1 });
     res.json({ success: true, data: quotations });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
