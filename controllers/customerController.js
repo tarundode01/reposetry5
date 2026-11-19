@@ -581,14 +581,139 @@ exports.respondQuotation = async (req, res) => {
     quotation.status = status;
     await quotation.save();
 
-    // Notify Admin of Quotation Response
+    let dealResult = null;
+    let invoiceResult = null;
+    let linkedEnquiry = null;
+
+    // 🏆 Industry Standard Quote-to-Cash (Q2C) Deal Conversion Flow:
+    if (status === 'Accepted') {
+      const quotationVal = Number(quotation.totalAmount || quotation.subTotal || 0);
+
+      // 1. Find linked Enquiry to identify assigned sales executive
+      linkedEnquiry = await Enquiry.findOne({
+        customerId: req.user._id,
+        $or: [
+          { subject: quotation.title },
+          { productService: quotation.title },
+          { status: { $in: ['Assigned', 'Proposal Sent', 'In Discussion', 'Contacted', 'Qualified', 'Received', 'Submitted'] } }
+        ]
+      }).sort({ updatedAt: -1 });
+
+      const assignedSalesPersonId = linkedEnquiry?.assignedSalesId || null;
+
+      // 2. Create or Update Deal -> Stage: 'Won'
+      let deal = await Deal.findOne({
+        customerId: req.user._id,
+        $or: [
+          { title: quotation.title },
+          { title: `Deal - ${quotation.title}` }
+        ]
+      });
+
+      if (!deal) {
+        deal = new Deal({
+          customerId: req.user._id,
+          title: quotation.title || `Project Deal - ${quotation.quotationNumber}`,
+          value: quotationVal,
+          currency: 'INR',
+          stage: 'Won',
+          closingDate: new Date(),
+          assignedSales: assignedSalesPersonId,
+          notes: `Deal Closed Won automatically via Customer Quotation Acceptance (${quotation.quotationNumber || 'QUOT'}).`
+        });
+      } else {
+        deal.stage = 'Won';
+        deal.value = quotationVal || deal.value;
+        deal.closingDate = new Date();
+        if (assignedSalesPersonId && !deal.assignedSales) {
+          deal.assignedSales = assignedSalesPersonId;
+        }
+        deal.notes = (deal.notes ? deal.notes + ' | ' : '') + `Accepted ${quotation.quotationNumber} on ${new Date().toLocaleDateString('en-GB')}`;
+      }
+      dealResult = await deal.save();
+
+      // 3. Update linked Enquiry status to 'Converted' & log in timeline
+      if (linkedEnquiry) {
+        linkedEnquiry.status = 'Converted';
+        linkedEnquiry.timeline = linkedEnquiry.timeline || [];
+        linkedEnquiry.timeline.push({
+          status: 'Converted',
+          title: 'Deal Won & Converted 🏆',
+          step: 'Quotation Accepted by Customer',
+          date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+          note: `Customer ${req.user.name || 'Client'} accepted quotation ${quotation.quotationNumber || ''} (₹${quotationVal.toLocaleString('en-IN')}). Deal marked Closed Won.`,
+          timestamp: new Date()
+        });
+        await linkedEnquiry.save();
+      }
+
+      // 4. Auto-generate Proforma Commercial Invoice
+      try {
+        const invCount = await Invoice.countDocuments();
+        const generatedInvNum = `INV-${2000 + invCount + 1}`;
+        const invoiceDueDate = quotation.validUntil || new Date(Date.now() + 15 * 24 * 60 * 60 * 1000); // 15 days default
+
+        const invoiceItems = (quotation.items && quotation.items.length > 0)
+          ? quotation.items.map(it => ({
+              description: it.name || quotation.title,
+              quantity: it.qty || 1,
+              unitPrice: it.rate || it.amount || quotationVal,
+              total: it.amount || (it.qty && it.rate ? it.qty * it.rate : quotationVal)
+            }))
+          : [
+              {
+                description: quotation.title || 'Professional Service Scope',
+                quantity: 1,
+                unitPrice: quotationVal,
+                total: quotationVal
+              }
+            ];
+
+        invoiceResult = await Invoice.create({
+          customerId: req.user._id,
+          invoiceNumber: generatedInvNum,
+          amount: quotationVal,
+          status: 'pending',
+          dueDate: invoiceDueDate,
+          items: invoiceItems
+        });
+      } catch (invErr) {
+        console.error('Invoice auto-creation note:', invErr.message);
+      }
+
+      // 5. Notify Assigned Sales Employee (if assigned)
+      if (assignedSalesPersonId) {
+        try {
+          await Notification.create({
+            recipientRole: 'employee',
+            userId: assignedSalesPersonId,
+            customerId: req.user._id,
+            title: `🏆 Deal Won! ${req.user.name || 'Client'} Accepted Quote`,
+            message: `Congratulations! ${req.user.name || 'Client'} accepted quotation ${quotation.quotationNumber || ''} for ₹${quotationVal.toLocaleString('en-IN')}. Lead converted to Deal Won!`,
+            type: 'deal',
+            senderName: req.user.name,
+            senderRole: 'customer',
+            linkId: dealResult?._id?.toString() || quotation._id.toString()
+          });
+        } catch (empNotifErr) {
+          console.error('Employee notification error:', empNotifErr.message);
+        }
+      }
+    }
+
+    // 6. Notify Admin of Quotation Response (Accepted / Rejected / Revision Requested)
     try {
+      const isWon = status === 'Accepted';
       await Notification.create({
         recipientRole: 'admin',
         customerId: req.user._id,
-        title: `💰 Quotation ${quotation.quotationNumber || 'Response'}: ${status}`,
-        message: `${req.user.name || 'Client'} has responded with "${status}" on quotation for ${quotation.title || 'Project'}.`,
-        type: 'quotation',
+        title: isWon
+          ? `🎉 Deal Won! ${req.user.name || 'Client'} Accepted Quotation`
+          : `💰 Quotation ${quotation.quotationNumber || 'Response'}: ${status}`,
+        message: isWon
+          ? `${req.user.name || 'Client'} accepted quotation ${quotation.quotationNumber || ''} for "${quotation.title}". Deal marked as Won, Lead Converted, and Proforma Invoice generated!`
+          : `${req.user.name || 'Client'} responded with "${status}" on quotation for ${quotation.title || 'Project'}.`,
+        type: isWon ? 'deal' : 'quotation',
         senderName: req.user.name,
         senderRole: 'customer',
         linkId: quotation._id.toString()
@@ -597,8 +722,20 @@ exports.respondQuotation = async (req, res) => {
       console.error('Error creating quotation notification:', nErr.message);
     }
 
-    res.json({ success: true, message: `Quotation status updated to ${status}`, data: quotation });
+    res.json({
+      success: true,
+      message: status === 'Accepted'
+        ? `Quotation accepted! Deal successfully converted to Won and Invoice generated.`
+        : `Quotation status updated to ${status}`,
+      data: {
+        quotation,
+        deal: dealResult,
+        invoice: invoiceResult,
+        enquiry: linkedEnquiry
+      }
+    });
   } catch (error) {
+    console.error('respondQuotation error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
