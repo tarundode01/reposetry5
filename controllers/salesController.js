@@ -451,21 +451,12 @@ exports.updateLeadStatus = async (req, res) => {
   }
 };
 
-// 6. Customers Management: Get only customers whose leads/enquiries are assigned to this employee
+// 6. Customers Management: Get all customers so employee can select real database clients for quotations & dispatch
 exports.getMyCustomers = async (req, res) => {
   try {
     const empId = req.user._id;
-    // Find all enquiries assigned to this sales employee
-    const assignedEnquiries = await Enquiry.find({
-      $or: [{ assignedSalesId: empId }, { assignedSales: empId }]
-    }).select('customerId');
-
-    const customerIds = assignedEnquiries
-      .map(e => e.customerId)
-      .filter(id => id != null);
-
+    // Find all customers from database
     const customers = await User.find({
-      _id: { $in: customerIds },
       role: 'customer'
     }).select('-password').sort({ createdAt: -1 });
 
