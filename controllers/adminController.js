@@ -390,7 +390,7 @@ exports.createLeadAdmin = async (req, res) => {
 exports.updateLeadAdmin = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, priority, budget, notes, productService, subject, source, platformLeadId, campaign, isDuplicateFlagged, duplicateDismissed, duplicateMatchReason, duplicateLinkedCustomerId, customerId } = req.body;
+    const { status, priority, budget, notes, productService, subject, source, platformLeadId, campaign, isDuplicateFlagged, duplicateDismissed, duplicateMatchReason, duplicateLinkedCustomerId, customerId, reminderDate, reminderTime, reminderNote, communicationChannel, communicationNote } = req.body;
     const lead = await Enquiry.findById(id);
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
@@ -408,11 +408,26 @@ exports.updateLeadAdmin = async (req, res) => {
     if (duplicateLinkedCustomerId !== undefined) lead.duplicateLinkedCustomerId = duplicateLinkedCustomerId;
     if (customerId) lead.customerId = customerId;
 
-    if (notes) {
+    if (reminderDate !== undefined) {
+      lead.reminderDate = reminderDate ? new Date(reminderDate) : null;
+      lead.reminderTime = reminderTime || '11:00 AM';
+      lead.reminderNote = reminderNote || null;
+    }
+
+    if (communicationChannel) {
+      lead.lastCommunication = {
+        channel: communicationChannel,
+        note: communicationNote || notes || null,
+        communicatedAt: new Date(),
+        communicatedByName: 'Admin / Manager'
+      };
+    }
+
+    if (notes || reminderNote || communicationNote) {
       lead.timeline.push({
         status: status || lead.status,
-        step: `Admin Update: ${status || lead.status}`,
-        note: notes,
+        step: `Follow-up / Update: ${status || lead.status}`,
+        note: notes || communicationNote || reminderNote,
         date: new Date().toLocaleDateString('en-GB'),
         timestamp: new Date()
       });

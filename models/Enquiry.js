@@ -101,6 +101,27 @@ const enquirySchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  // ⏰ Scheduled Reminder & Callback Tracking
+  reminderDate: {
+    type: Date,
+    default: null
+  },
+  reminderTime: {
+    type: String,
+    default: '11:00 AM'
+  },
+  reminderNote: {
+    type: String,
+    default: null
+  },
+  // 📞 Latest Discussion / Communication Summary
+  lastCommunication: {
+    channel: { type: String, default: null }, // 'Call', 'WhatsApp', 'Email', 'Meeting'
+    note: { type: String, default: null },
+    communicatedAt: { type: Date, default: null },
+    communicatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    communicatedByName: { type: String, default: null }
+  },
   timeline: [
     {
       status: String,

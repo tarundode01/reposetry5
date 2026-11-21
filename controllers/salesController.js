@@ -387,11 +387,11 @@ exports.createLead = async (req, res) => {
   }
 };
 
-// 5. Update Lead Status / Notes
+// 5. Update Lead Status / Notes / Reminders
 exports.updateLeadStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, notes, priority } = req.body;
+    const { status, notes, priority, reminderDate, reminderTime, reminderNote, communicationChannel, communicationNote } = req.body;
     const empId = req.user._id;
 
     // Strict Ownership Check: Only the assigned sales employee (or admin) can manage this lead
@@ -413,11 +413,47 @@ exports.updateLeadStatus = async (req, res) => {
 
     if (status) lead.status = status;
     if (priority) lead.priority = priority;
-    if (notes) {
+
+    if (reminderDate !== undefined) {
+      lead.reminderDate = reminderDate ? new Date(reminderDate) : null;
+      lead.reminderTime = reminderTime || '11:00 AM';
+      lead.reminderNote = reminderNote || null;
+
+      // Automatically sync a Follow-up Action Task on the Tasks tab if reminderDate is set
+      if (reminderDate) {
+        try {
+          await Task.create({
+            title: `Follow-up Call: ${lead.subject || 'Client Enquiry'}`,
+            description: reminderNote || `Scheduled 5-day callback with client. Discuss proposal & next steps.`,
+            dueDate: new Date(reminderDate),
+            priority: priority || 'High',
+            assignedTo: empId,
+            category: 'Follow-up',
+            clientName: lead.customerId ? lead.customerId.name : 'Client',
+            lead: lead._id,
+            status: 'Pending'
+          });
+        } catch (tErr) {
+          console.error('Task auto-creation error:', tErr.message);
+        }
+      }
+    }
+
+    if (communicationChannel) {
+      lead.lastCommunication = {
+        channel: communicationChannel,
+        note: communicationNote || notes || null,
+        communicatedAt: new Date(),
+        communicatedBy: empId,
+        communicatedByName: req.user.name || 'Sales Executive'
+      };
+    }
+
+    if (notes || reminderNote || communicationNote) {
       lead.timeline.push({
-        step: `Status: ${status || lead.status}`,
+        step: `Follow-up / Status: ${status || lead.status}`,
         date: new Date().toLocaleDateString('en-GB'),
-        note: notes
+        note: notes || communicationNote || reminderNote
       });
     }
 
@@ -510,7 +546,9 @@ exports.getMyCustomers = async (req, res) => {
 // 7. Tasks Management: Get & Create
 exports.getTasks = async (req, res) => {
   try {
-    const tasks = await Task.find({ assignedTo: req.user._id }).sort({ dueDate: 1 });
+    const tasks = await Task.find({ assignedTo: req.user._id })
+      .populate('lead', 'enquiryId subject customerName reminderDate reminderTime lastCommunication')
+      .sort({ dueDate: 1 });
     res.json({ success: true, data: tasks });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
