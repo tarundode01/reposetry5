@@ -101,26 +101,6 @@ const enquirySchema = new mongoose.Schema({
     type: Date,
     default: null
   },
-  // Follow-up & Reminder System
-  reminderDate: {
-    type: Date,
-    default: null
-  },
-  reminderTime: {
-    type: String,
-    default: '11:00 AM'
-  },
-  reminderNote: {
-    type: String,
-    default: null
-  },
-  lastCommunication: {
-    channel: { type: String, enum: ['Call', 'WhatsApp', 'Email', 'Chat', 'Meeting', null], default: null },
-    note: { type: String, default: null },
-    communicatedAt: { type: Date, default: null },
-    communicatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-    communicatedByName: { type: String, default: null }
-  },
   timeline: [
     {
       status: String,
