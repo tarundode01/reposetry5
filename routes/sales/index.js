@@ -33,6 +33,7 @@ router.post('/followups', salesController.createFollowup);
 // Calls
 router.get('/calls', salesController.getCalls);
 router.post('/calls', salesController.logCall);
+router.post('/calls/:id/share-admin', salesController.shareCallWithAdmin);
 
 // Attendance
 router.get('/attendance/today', salesController.getTodayAttendance);

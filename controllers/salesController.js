@@ -635,21 +635,76 @@ exports.createFollowup = async (req, res) => {
   }
 };
 
-// 9. Call Management: Log a call
+// 9. Call Management: Log a call with rich recording & requirement history
 exports.logCall = async (req, res) => {
   try {
-    const { customerName, phoneNumber, callType, duration, outcome, notes } = req.body;
+    const { 
+      customerName, 
+      phoneNumber, 
+      company,
+      callType, 
+      duration, 
+      callStartTime,
+      callEndTime,
+      outcome, 
+      notes,
+      clientRequirement,
+      recordingUrl,
+      recordingFileName,
+      leadId,
+      customerId
+    } = req.body;
+
     const call = await Call.create({
       employee: req.user._id,
-      customerName,
-      phoneNumber,
+      customer: customerId || undefined,
+      lead: leadId || undefined,
+      customerName: customerName || 'Client',
+      phoneNumber: phoneNumber || '+91',
+      company: company || '',
       callType: callType || 'Outgoing',
       duration: duration || '02:15',
+      callStartTime: callStartTime || new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      callEndTime: callEndTime || new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
       outcome: outcome || 'Connected',
-      notes: notes || 'Call logged via mobile'
+      notes: notes || 'Call logged via mobile',
+      clientRequirement: clientRequirement || notes || 'Requirement discussion completed.',
+      recordingUrl: recordingUrl || '',
+      recordingFileName: recordingFileName || `Call_Rec_${Date.now()}.mp3`
     });
+
     await logActivity(req.user._id, 'Call Logged', `Called ${customerName} (${outcome})`);
     res.status(201).json({ success: true, data: call });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.shareCallWithAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const call = await Call.findById(id);
+    if (!call) {
+      return res.status(404).json({ success: false, message: 'Call record not found' });
+    }
+    call.sharedWithAdmin = true;
+    call.sharedAt = new Date();
+    await call.save();
+
+    // Create Notification for Admin
+    try {
+      await Notification.create({
+        recipientRole: 'admin',
+        title: `🎙️ Call Recording Shared: ${call.customerName}`,
+        message: `${req.user.name || 'Sales Employee'} shared call recording & client requirement notes for ${call.customerName} (${call.phoneNumber}). Duration: ${call.duration}.`,
+        type: 'call',
+        senderName: req.user.name,
+        senderRole: 'employee',
+        linkId: call._id.toString()
+      });
+    } catch (_) {}
+
+    res.json({ success: true, message: 'Call recording & notes shared with Admin dashboard!', data: call });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
