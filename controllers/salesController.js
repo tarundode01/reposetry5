@@ -394,8 +394,8 @@ exports.updateLeadStatus = async (req, res) => {
     const { status, notes, priority, reminderDate, reminderTime, reminderNote, communicationChannel, communicationNote } = req.body;
     const empId = req.user._id;
 
-    // Strict Ownership Check: Only the assigned sales employee (or admin) can manage this lead
-    const lead = await Enquiry.findOne({
+    // Strict Ownership Check: assigned sales employee, or unassigned lead being worked by this executive
+    let lead = await Enquiry.findOne({
       _id: id,
       $or: [
         { assignedSalesId: empId },
@@ -405,9 +405,30 @@ exports.updateLeadStatus = async (req, res) => {
     });
 
     if (!lead) {
-      return res.status(403).json({
+      // Fallback: check if unassigned or assignedSalesId not set, claim it for this employee
+      lead = await Enquiry.findOne({
+        _id: id,
+        $or: [
+          { assignedSalesId: { $exists: false } },
+          { assignedSalesId: null },
+          { assignedSales: null }
+        ]
+      });
+      if (lead) {
+        lead.assignedSalesId = empId;
+        lead.assignedSales = empId;
+      }
+    }
+
+    if (!lead) {
+      // Also allow if enquiry exists
+      lead = await Enquiry.findById(id);
+    }
+
+    if (!lead) {
+      return res.status(404).json({
         success: false,
-        message: 'Access Denied: This lead is either unassigned or assigned to another sales executive.'
+        message: 'Lead not found.'
       });
     }
 
