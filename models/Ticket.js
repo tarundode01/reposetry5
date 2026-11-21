@@ -50,6 +50,19 @@ const ticketSchema = new mongoose.Schema({
         type: String,
         required: true
       },
+      seen: {
+        type: Boolean,
+        default: false
+      },
+      seenAt: {
+        type: Date,
+        default: null
+      },
+      seenBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+      },
       createdAt: {
         type: Date,
         default: Date.now

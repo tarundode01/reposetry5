@@ -6,6 +6,19 @@ const quotationSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  createdByName: {
+    type: String,
+    default: null
+  },
+  createdByRole: {
+    type: String,
+    default: 'sales'
+  },
   quotationNumber: {
     type: String,
     unique: true

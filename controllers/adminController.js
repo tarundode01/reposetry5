@@ -168,10 +168,16 @@ exports.getAdminDashboard = async (req, res) => {
   }
 };
 
-// 3. Employee Management (CRUD)
+// 3. Employee Management (CRUD) - SaaS Rule: Only show Active & Approved staff in Team Members list
 exports.getAllEmployees = async (req, res) => {
   try {
-    const employees = await User.find({ role: { $in: ['sales', 'support', 'employee', 'admin'] } }).select('-password').sort({ createdAt: -1 });
+    const employees = await User.find({
+      role: { $in: ['sales', 'support', 'employee', 'admin'] },
+      $or: [
+        { isApproved: true },
+        { status: 'active' }
+      ]
+    }).select('-password').sort({ createdAt: -1 });
     res.json({ success: true, data: employees });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -672,10 +678,20 @@ exports.replyTicketAdmin = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
 
+    // Mark any unread customer messages as seen by admin
+    ticket.messages.forEach(msg => {
+      if (msg.sender === 'customer' && !msg.seen) {
+        msg.seen = true;
+        msg.seenAt = new Date();
+        msg.seenBy = req.user ? req.user._id : null;
+      }
+    });
+
     ticket.messages.push({
       sender: 'support',
       senderName: req.user ? req.user.name || 'Executive Support Admin' : 'Executive Support Admin',
       message: message.trim(),
+      seen: false,
       createdAt: new Date()
     });
 
@@ -783,42 +799,134 @@ exports.getAllQuotations = async (req, res) => {
 
 exports.createQuotationAdmin = async (req, res) => {
   try {
-    const { customerId, quotationNumber, title, items, totalAmount, validUntil, terms } = req.body;
-    if (!customerId || !title || !totalAmount) {
+    let { customerId, quotationNumber, title, items, totalAmount, subTotal, taxGst, validUntil, terms } = req.body;
+    if (!title || (!totalAmount && !subTotal)) {
       return res.status(400).json({ success: false, message: 'Customer, Title and Total Amount are required' });
     }
 
-    const qNum = quotationNumber || `QUOT-${Math.floor(10000 + Math.random() * 90000)}`;
+    // Resolve target Customer ID if customerId is an object or string
+    let targetCustomerId = null;
+    if (customerId && typeof customerId === 'object') {
+      targetCustomerId = customerId._id || customerId.id || customerId.customerId;
+    } else if (customerId && typeof customerId === 'string') {
+      targetCustomerId = customerId;
+    }
+
+    // If targetCustomerId is not a valid 24-char ObjectId, find actual Customer User
+    if (!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
+      const email = customerId?.email;
+      const phone = customerId?.phone;
+      if (email || phone) {
+        const foundUser = await User.findOne({
+          $or: [
+            ...(email ? [{ email: email.toLowerCase().trim() }] : []),
+            ...(phone ? [{ phone }] : [])
+          ]
+        });
+        if (foundUser) {
+          targetCustomerId = foundUser._id;
+        }
+      }
+    }
+
+    // Fallback: If no customer account found, use first available customer or req.user._id
+    if (!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
+      const anyCust = await User.findOne({ role: 'customer' });
+      targetCustomerId = anyCust ? anyCust._id : req.user._id;
+    }
+
+    const count = await Quotation.countDocuments();
+    const qNum = quotationNumber || `QT-${202600 + count + 1}`;
+    
+    // Normalize items
+    const formattedItems = (items && items.length > 0)
+      ? items.map(it => ({
+          name: it.name || title,
+          qty: Number(it.qty) || 1,
+          rate: Number(it.rate || it.unitPrice || 0),
+          amount: Number(it.amount || it.finalAmt || 0)
+        }))
+      : [{ name: title, qty: 1, rate: Number(totalAmount || subTotal), amount: Number(totalAmount || subTotal) }];
+
     const quotation = await Quotation.create({
       quotationNumber: qNum,
-      customerId,
+      customerId: targetCustomerId,
       title,
-      items: items || [],
-      totalAmount,
-      validUntil: validUntil || new Date(Date.now() + 15 * 24 * 60 * 60 * 1000),
-      terms: terms || 'Standard 50% advance, 50% on milestone completion.',
-      status: 'Sent',
+      items: formattedItems,
+      subTotal: Number(subTotal) || Number(totalAmount),
+      taxGst: Number(taxGst) || 0,
+      totalAmount: Number(totalAmount),
+      validUntil: validUntil || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      status: 'Received',
       createdBy: req.user._id
     });
 
-    res.status(201).json({ success: true, message: 'Quotation sent to customer successfully', data: quotation });
+    res.status(201).json({ success: true, message: 'Quotation created and sent successfully', data: quotation });
 
     // Notify Customer of Quotation
     try {
-      await Notification.create({
-        recipientRole: 'customer',
-        userId: customerId,
-        customerId,
-        title: `📜 Official Quotation: ${qNum}`,
-        message: `Admin sent formal quotation of ₹${Number(totalAmount).toLocaleString()} for "${title}". Check and respond.`,
-        type: 'quotation',
-        senderName: req.user ? req.user.name || 'OmniCRM HQ' : 'OmniCRM HQ',
-        senderRole: 'admin',
-        linkId: quotation._id.toString()
-      });
+      if (targetCustomerId) {
+        await Notification.create({
+          recipientRole: 'customer',
+          userId: targetCustomerId,
+          customerId: targetCustomerId,
+          title: `📜 Official Quotation: ${qNum}`,
+          message: `Admin sent formal quotation of ₹${Number(totalAmount).toLocaleString()} for "${title}". Check and respond.`,
+          type: 'quotation',
+          senderName: req.user ? req.user.name || 'Admin HQ' : 'Admin HQ',
+          senderRole: 'admin',
+          linkId: quotation._id.toString()
+        });
+      }
     } catch (nErr) {
       console.error('Error creating quotation notification:', nErr.message);
     }
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateQuotationAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { title, items, totalAmount, subTotal, taxGst, validUntil, status } = req.body;
+
+    const quotation = await Quotation.findById(id);
+    if (!quotation) {
+      return res.status(404).json({ success: false, message: 'Quotation not found' });
+    }
+
+    if (title) quotation.title = title;
+    if (totalAmount !== undefined) quotation.totalAmount = Number(totalAmount);
+    if (subTotal !== undefined) quotation.subTotal = Number(subTotal);
+    if (taxGst !== undefined) quotation.taxGst = Number(taxGst);
+    if (validUntil) quotation.validUntil = validUntil;
+    if (status) quotation.status = status;
+
+    if (items && items.length > 0) {
+      quotation.items = items.map(it => ({
+        name: it.name || quotation.title,
+        qty: Number(it.qty) || 1,
+        rate: Number(it.rate || it.unitPrice || 0),
+        amount: Number(it.amount || it.finalAmt || 0)
+      }));
+    }
+
+    await quotation.save();
+    res.json({ success: true, message: 'Quotation updated successfully', data: quotation });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.deleteQuotationAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const quotation = await Quotation.findByIdAndDelete(id);
+    if (!quotation) {
+      return res.status(404).json({ success: false, message: 'Quotation not found' });
+    }
+    res.json({ success: true, message: 'Quotation deleted successfully', data: quotation });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

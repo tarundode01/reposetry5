@@ -52,6 +52,8 @@ router.put('/meetings/:id', adminController.updateMeetingStatusAdmin);
 // Quotations & Commercials
 router.get('/quotations', adminController.getAllQuotations);
 router.post('/quotations', adminController.createQuotationAdmin);
+router.put('/quotations/:id', adminController.updateQuotationAdmin);
+router.delete('/quotations/:id', adminController.deleteQuotationAdmin);
 
 // Notifications & Realtime Alerts
 router.get('/notifications', adminController.getAdminNotifications);

@@ -41,25 +41,15 @@ exports.registerCustomer = async (req, res) => {
       company: company || '',
       businessType: businessType || 'Individual',
       role: 'customer',
-      status: 'pending_approval',
-      isApproved: false
+      status: 'active',
+      isApproved: true
     });
 
-    // Notify Admin by creating an ApprovalRequest
-    await ApprovalRequest.create({
-      requestType: 'New Customer Registration',
-      requestedBy: user._id,
-      requestedByName: `${user.name} (${user.company || 'Customer'})`,
-      subject: `New Customer Registration: ${user.name}`,
-      description: `New customer account registered for ${user.email} (Phone: ${user.phone || 'N/A'}, Company: ${user.company || 'Individual'}). Awaiting Admin authorization.`,
-      status: 'Pending',
-      targetRole: 'customer'
-    });
+    const token = generateToken(user._id);
 
     res.status(201).json({
       success: true,
-      pendingApproval: true,
-      message: 'Account registered successfully! Your account is pending Admin approval. You can login once approved.',
+      message: 'Account registered successfully!',
       data: {
         _id: user._id,
         name: user.name,
@@ -68,7 +58,8 @@ exports.registerCustomer = async (req, res) => {
         company: user.company,
         role: user.role,
         status: user.status,
-        isApproved: false
+        isApproved: true,
+        token
       }
     });
   } catch (error) {
@@ -427,7 +418,7 @@ exports.createTicket = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Subject and description are required' });
     }
 
-    // Auto-link assigned sales employee if this customer has an assigned lead/enquiry
+    // Auto-link assigned sales employee if this customer has an assigned lead/enquiry, deal, or quotation
     let assignedStaff = null;
     const latestEnquiry = await Enquiry.findOne({
       customerId: req.user._id,
@@ -436,6 +427,19 @@ exports.createTicket = async (req, res) => {
 
     if (latestEnquiry && latestEnquiry.assignedSalesId) {
       assignedStaff = latestEnquiry.assignedSalesId;
+    } else {
+      // Check if any quotation or deal was assigned/created by a sales rep
+      const Quotation = require('../models/Quotation');
+      const latestQuote = await Quotation.findOne({
+        customerId: req.user._id,
+        $or: [
+          { assignedSales: { $ne: null } },
+          { createdBy: { $ne: null } }
+        ]
+      }).sort({ updatedAt: -1 });
+      if (latestQuote) {
+        assignedStaff = latestQuote.assignedSales || latestQuote.createdBy;
+      }
     }
 
     const ticket = await Ticket.create({
@@ -467,6 +471,20 @@ exports.createTicket = async (req, res) => {
         senderRole: 'customer',
         linkId: ticket._id.toString()
       });
+      // Also notify assigned sales employee if present
+      if (assignedStaff) {
+        await Notification.create({
+          recipientRole: 'employee',
+          userId: assignedStaff,
+          customerId: req.user._id,
+          title: `🎫 Client Inquiry: ${ticket.ticketNumber || ticket.subject}`,
+          message: `${req.user.name || 'Client'} raised a ticket "${subject}". You can reply directly in Support.`,
+          type: 'ticket',
+          senderName: req.user.name,
+          senderRole: 'customer',
+          linkId: ticket._id.toString()
+        });
+      }
     } catch (nErr) {
       console.error('Error creating ticket notification:', nErr.message);
     }
@@ -484,10 +502,20 @@ exports.replyTicket = async (req, res) => {
     if (!ticket) {
       return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
+    // Mark any support/admin replies as seen by customer when customer opens/replies
+    ticket.messages.forEach(msg => {
+      if ((msg.sender === 'support' || msg.sender === 'system') && !msg.seen) {
+        msg.seen = true;
+        msg.seenAt = new Date();
+        msg.seenBy = req.user._id;
+      }
+    });
+
     ticket.messages.push({
       sender: 'customer',
       senderName: req.user.name,
       message,
+      seen: false,
       createdAt: new Date()
     });
     if (['resolved', 'closed'].includes(ticket.status)) {
@@ -495,7 +523,7 @@ exports.replyTicket = async (req, res) => {
     }
     await ticket.save();
 
-    // Notify Admin of new Client Message
+    // Notify Admin and Assigned Sales Employee of new Client Message
     try {
       await Notification.create({
         recipientRole: 'admin',
@@ -507,6 +535,26 @@ exports.replyTicket = async (req, res) => {
         senderRole: 'customer',
         linkId: ticket._id.toString()
       });
+
+      // Also notify assigned sales employee if exists on ticket or enquiry
+      let targetEmpId = ticket.assignedTo;
+      if (!targetEmpId) {
+        const enq = await Enquiry.findOne({ customerId: req.user._id, assignedSalesId: { $ne: null } });
+        if (enq && enq.assignedSalesId) targetEmpId = enq.assignedSalesId;
+      }
+      if (targetEmpId) {
+        await Notification.create({
+          recipientRole: 'employee',
+          userId: targetEmpId,
+          customerId: req.user._id,
+          title: `💬 Client Message: ${ticket.ticketNumber || ticket.subject}`,
+          message: `${req.user.name || 'Client'}: "${message.length > 60 ? message.substring(0, 60) + '...' : message}"`,
+          type: 'chat',
+          senderName: req.user.name,
+          senderRole: 'customer',
+          linkId: ticket._id.toString()
+        });
+      }
     } catch (nErr) {
       console.error('Error creating reply notification:', nErr.message);
     }
@@ -565,26 +613,23 @@ exports.bookMeeting = async (req, res) => {
 exports.getQuotations = async (req, res) => {
   try {
     const user = req.user;
-    
-    // Find all enquiries belonging to this user
+
+    // Strict multi-tenant customer isolation:
+    // 1. Direct match with user._id
+    // 2. Also find enquiries created by or matching this user's email/phone to ensure quotes created against linked enquiries are included
     const userEnquiries = await Enquiry.find({
       $or: [
         { customerId: user._id },
-        { customer: user._id }
+        ...(user.email ? [{ email: user.email.toLowerCase().trim() }] : []),
+        ...(user.phone ? [{ phone: user.phone }] : [])
       ]
     }).select('_id');
     const enquiryIds = userEnquiries.map(e => e._id);
 
-    // Match criteria:
-    // 1. Direct customerId matching user._id
-    // 2. customerId populated or linked by email or phone
-    // 3. Or linked through customer's enquiries
     const quotations = await Quotation.find({
       $or: [
         { customerId: user._id },
         { 'customerId._id': user._id },
-        { 'customerId.email': user.email },
-        { 'customerId.phone': user.phone },
         ...(enquiryIds.length > 0 ? [{ customerId: { $in: enquiryIds } }] : [])
       ]
     }).sort({ createdAt: -1 });
@@ -598,11 +643,31 @@ exports.getQuotations = async (req, res) => {
 exports.respondQuotation = async (req, res) => {
   try {
     const { status } = req.body; // 'Accepted' | 'Rejected' | 'Revision Requested'
-    const quotation = await Quotation.findOne({ _id: req.params.id, customerId: req.user._id });
+    const user = req.user;
+
+    // Find user's linked enquiries if quotation was linked to an enquiry id
+    const userEnquiries = await Enquiry.find({
+      $or: [
+        { customerId: user._id },
+        ...(user.email ? [{ email: user.email.toLowerCase().trim() }] : []),
+        ...(user.phone ? [{ phone: user.phone }] : [])
+      ]
+    }).select('_id');
+    const enquiryIds = userEnquiries.map(e => e._id);
+
+    const quotation = await Quotation.findOne({
+      _id: req.params.id,
+      $or: [
+        { customerId: user._id },
+        ...(enquiryIds.length > 0 ? [{ customerId: { $in: enquiryIds } }] : [])
+      ]
+    });
     if (!quotation) {
       return res.status(404).json({ success: false, message: 'Quotation not found' });
     }
     quotation.status = status;
+    // ensure customerId is normalized to actual customer User id
+    quotation.customerId = user._id;
     await quotation.save();
 
     let dealResult = null;
@@ -679,19 +744,19 @@ exports.respondQuotation = async (req, res) => {
 
         const invoiceItems = (quotation.items && quotation.items.length > 0)
           ? quotation.items.map(it => ({
-              description: it.name || quotation.title,
-              quantity: it.qty || 1,
-              unitPrice: it.rate || it.amount || quotationVal,
-              total: it.amount || (it.qty && it.rate ? it.qty * it.rate : quotationVal)
-            }))
+            description: it.name || quotation.title,
+            quantity: it.qty || 1,
+            unitPrice: it.rate || it.amount || quotationVal,
+            total: it.amount || (it.qty && it.rate ? it.qty * it.rate : quotationVal)
+          }))
           : [
-              {
-                description: quotation.title || 'Professional Service Scope',
-                quantity: 1,
-                unitPrice: quotationVal,
-                total: quotationVal
-              }
-            ];
+            {
+              description: quotation.title || 'Professional Service Scope',
+              quantity: 1,
+              unitPrice: quotationVal,
+              total: quotationVal
+            }
+          ];
 
         invoiceResult = await Invoice.create({
           customerId: req.user._id,
@@ -904,8 +969,7 @@ exports.getCustomerNotifications = async (req, res) => {
     const notifications = await Notification.find({
       $or: [
         { customerId: req.user._id },
-        { userId: req.user._id },
-        { recipientRole: 'customer' }
+        { userId: req.user._id }
       ]
     })
       .sort({ createdAt: -1 })
@@ -914,8 +978,7 @@ exports.getCustomerNotifications = async (req, res) => {
     const unreadCount = await Notification.countDocuments({
       $or: [
         { customerId: req.user._id },
-        { userId: req.user._id },
-        { recipientRole: 'customer' }
+        { userId: req.user._id }
       ],
       read: false
     });
@@ -934,15 +997,21 @@ exports.markCustomerNotificationRead = async (req, res) => {
         {
           $or: [
             { customerId: req.user._id },
-            { userId: req.user._id },
-            { recipientRole: 'customer' }
+            { userId: req.user._id }
           ]
         },
         { $set: { read: true } }
       );
       return res.json({ success: true, message: 'All notifications marked as read' });
     }
-    const notif = await Notification.findByIdAndUpdate(id, { read: true }, { new: true });
+    const notif = await Notification.findOneAndUpdate(
+      {
+        _id: id,
+        $or: [{ customerId: req.user._id }, { userId: req.user._id }]
+      },
+      { read: true },
+      { new: true }
+    );
     res.json({ success: true, data: notif });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

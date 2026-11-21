@@ -70,13 +70,30 @@ exports.employeeRegister = async (req, res) => {
 
     // Notify Admin by creating an Approval Request in MongoDB
     await ApprovalRequest.create({
+      employee: user._id,
       requestType: 'New Employee Registration',
+      subject: `New Sales Staff Approval: ${user.name} (${user.designation})`,
+      description: `Staff member ${user.name} (${user.email}, ${user.phone}) registered for ${user.designation} (${user.department}). Employee ID: ${employeeId}. Awaiting managerial activation.`,
       requestedBy: user._id,
       requestedByName: `${user.name} (${user.designation})`,
-      details: `New staff account created (${user.email}). Awaiting Managerial Approval.`,
-      status: 'Pending',
-      amount: employeeId
+      targetRole: 'sales',
+      status: 'Pending'
     });
+
+    // Send instant high-priority Admin Notification
+    try {
+      await Notification.create({
+        recipientRole: 'admin',
+        title: `👤 New Sales Executive Registration: ${user.name}`,
+        message: `${user.name} (${user.email}, ${user.designation}) has registered. Please review and authorize account access in Approvals.`,
+        type: 'approval',
+        linkId: String(user._id),
+        senderName: user.name,
+        senderRole: 'sales'
+      });
+    } catch (notifErr) {
+      console.error('Admin registration notification error:', notifErr.message);
+    }
 
     await logActivity(user._id, 'Register', 'Employee Registration Submitted', `Awaiting admin approval for ${user.email}`);
 
@@ -260,23 +277,34 @@ exports.getEmployeeDashboard = async (req, res) => {
   }
 };
 
-// 3. Leads Management: Get only assigned leads to this employee
+// 3. Leads Management: Get only assigned leads to this employee (SaaS Multi-tenant Isolation)
 exports.getLeads = async (req, res) => {
   try {
     const { status, search, priority } = req.query;
     const empId = req.user._id;
 
-    // Show assigned leads or all company leads/enquiries so employee can generate quotes & reach out
-    let query = {};
+    // Strict isolation: Show ONLY leads specifically assigned to THIS sales employee
+    let query = {
+      $or: [
+        { assignedSalesId: empId },
+        { assignedSales: empId },
+        { 'assignedSales.email': req.user.email }
+      ]
+    };
+
     if (status && status !== 'All') query.status = status;
     if (priority && priority !== 'All') query.priority = priority;
 
     if (search) {
-      query.$or = [
-        { subject: { $regex: search, $options: 'i' } },
-        { productService: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } },
-        { enquiryId: { $regex: search, $options: 'i' } }
+      query.$and = [
+        {
+          $or: [
+            { subject: { $regex: search, $options: 'i' } },
+            { productService: { $regex: search, $options: 'i' } },
+            { description: { $regex: search, $options: 'i' } },
+            { enquiryId: { $regex: search, $options: 'i' } }
+          ]
+        }
       ];
     }
 
@@ -431,12 +459,45 @@ exports.updateLeadStatus = async (req, res) => {
   }
 };
 
-// 6. Customers Management: Get all customers so employee can select real database clients for quotations & dispatch
+// 6. Customers Management: Get only customers assigned to or interacted with by this sales employee (SaaS Isolation)
 exports.getMyCustomers = async (req, res) => {
   try {
     const empId = req.user._id;
-    // Find all customers from database
+
+    // 1. Find all customers from leads assigned to this employee
+    const assignedLeads = await Enquiry.find({
+      $or: [
+        { assignedSalesId: empId },
+        { assignedSales: empId },
+        { 'assignedSales.email': req.user.email }
+      ]
+    }).select('customerId');
+
+    // 2. Find all customers from deals assigned to this employee
+    const assignedDeals = await Deal.find({
+      $or: [
+        { assignedSales: empId },
+        { assignedTo: empId }
+      ]
+    }).select('customerId');
+
+    // 3. Find all customers from quotations created by this employee
+    const myQuotations = await Quotation.find({
+      $or: [
+        { createdBy: empId }
+      ]
+    }).select('customerId');
+
+    const customerIdSet = new Set();
+    assignedLeads.forEach(l => { if (l.customerId) customerIdSet.add(String(l.customerId)); });
+    assignedDeals.forEach(d => { if (d.customerId) customerIdSet.add(String(d.customerId)); });
+    myQuotations.forEach(q => { if (q.customerId) customerIdSet.add(String(q.customerId)); });
+
+    const customerIds = Array.from(customerIdSet);
+
+    // Fetch only those customer profiles
     const customers = await User.find({
+      _id: { $in: customerIds },
       role: 'customer'
     }).select('-password').sort({ createdAt: -1 });
 
@@ -638,10 +699,27 @@ exports.getMeetings = async (req, res) => {
   }
 };
 
-// 13. Quotations Management (Get & Send Quotation to Customer)
+// 13. Quotations Management (Strictly isolated by creator or assigned sales employee)
 exports.getQuotations = async (req, res) => {
   try {
-    const quotations = await Quotation.find({})
+    const empId = req.user._id;
+
+    // SaaS Isolation: An employee only sees quotations they created or for leads assigned to them
+    const assignedLeads = await Enquiry.find({
+      $or: [
+        { assignedSalesId: empId },
+        { assignedSales: empId },
+        { 'assignedSales.email': req.user.email }
+      ]
+    }).select('customerId');
+    const myCustomerIds = assignedLeads.map(l => l.customerId).filter(Boolean);
+
+    const quotations = await Quotation.find({
+      $or: [
+        { createdBy: empId },
+        { customerId: { $in: myCustomerIds } }
+      ]
+    })
       .populate('customerId', 'name customerName company email phone address avatar')
       .sort({ createdAt: -1 });
     res.json({ success: true, data: quotations });
@@ -659,41 +737,87 @@ exports.sendQuotationToCustomer = async (req, res) => {
 
     // Resolve target Customer ID if customerId is an object or enquiry
     let targetCustomerId = null;
-    if (customerId && typeof customerId === 'object') {
-      targetCustomerId = customerId._id || customerId.id || customerId.customerId;
+    let targetCustomerObj = (customerId && typeof customerId === 'object') ? customerId : null;
+
+    if (targetCustomerObj) {
+      targetCustomerId = targetCustomerObj._id || targetCustomerObj.id || targetCustomerObj.customerId;
     } else if (customerId && typeof customerId === 'string') {
       targetCustomerId = customerId;
     }
 
-    // If targetCustomerId is not a valid 24-char ObjectId or if it is from an enquiry, find actual Customer User
-    if (!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
-      const email = customerId?.email;
-      const phone = customerId?.phone;
+    // Step 1: If targetCustomerId matches an Enquiry, resolve the enquiry's customerId
+    if (targetCustomerId && targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
+      const enq = await Enquiry.findById(targetCustomerId);
+      if (enq && enq.customerId) {
+        targetCustomerId = enq.customerId.toString();
+      }
+    }
+
+    // Step 2: Also check enquiryId passed in body
+    if (enquiryId && (!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/))) {
+      const enq = await Enquiry.findById(enquiryId);
+      if (enq && enq.customerId) {
+        targetCustomerId = enq.customerId.toString();
+      }
+    }
+
+    // Step 3: Verify if targetCustomerId points to a real customer User
+    let verifiedUser = null;
+    if (targetCustomerId && targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
+      verifiedUser = await User.findById(targetCustomerId);
+      // If it's not a customer (e.g. an enquiry was mistaken or user doesn't exist)
+      if (!verifiedUser || verifiedUser.role !== 'customer') {
+        // If not a customer user, try finding by email/phone or enquiry
+        const enq = await Enquiry.findById(targetCustomerId);
+        if (enq) {
+          if (enq.customerId) {
+            verifiedUser = await User.findById(enq.customerId);
+            if (verifiedUser) targetCustomerId = verifiedUser._id.toString();
+          }
+          if (!verifiedUser && (enq.email || enq.phone)) {
+            verifiedUser = await User.findOne({
+              role: 'customer',
+              $or: [
+                ...(enq.email ? [{ email: enq.email.toLowerCase().trim() }] : []),
+                ...(enq.phone ? [{ phone: enq.phone }] : [])
+              ]
+            });
+            if (verifiedUser) targetCustomerId = verifiedUser._id.toString();
+          }
+        }
+      }
+    }
+
+    // Step 4: If still not resolved or verified, look up User by customer email or phone
+    if (!verifiedUser) {
+      const email = targetCustomerObj?.email || req.body.email || req.body.customerEmail;
+      const phone = targetCustomerObj?.phone || req.body.phone || req.body.customerPhone;
       if (email || phone) {
-        const foundUser = await User.findOne({
+        verifiedUser = await User.findOne({
+          role: 'customer',
           $or: [
             ...(email ? [{ email: email.toLowerCase().trim() }] : []),
             ...(phone ? [{ phone }] : [])
           ]
         });
-        if (foundUser) {
-          targetCustomerId = foundUser._id;
+        if (verifiedUser) {
+          targetCustomerId = verifiedUser._id.toString();
         }
       }
     }
 
-    // If still not matched, check if an Enquiry exists with customerId
-    if ((!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) && (enquiryId || customerId?._id)) {
-      const enq = await Enquiry.findById(enquiryId || customerId?._id);
-      if (enq && enq.customerId) {
-        targetCustomerId = enq.customerId;
+    // Step 5: Fallback if no specific customer found
+    if (!verifiedUser) {
+      if (targetCustomerId && targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
+        const u = await User.findById(targetCustomerId);
+        if (u) verifiedUser = u;
       }
-    }
-
-    // Fallback: If no customer account found, use req.user._id or first available customer
-    if (!targetCustomerId || !targetCustomerId.match(/^[0-9a-fA-F]{24}$/)) {
-      const anyCust = await User.findOne({ role: 'customer' });
-      targetCustomerId = anyCust ? anyCust._id : req.user._id;
+      if (!verifiedUser) {
+        const anyCust = await User.findOne({ role: 'customer' });
+        targetCustomerId = anyCust ? anyCust._id : req.user._id;
+      } else {
+        targetCustomerId = verifiedUser._id;
+      }
     }
 
     const count = await Quotation.countDocuments();
@@ -701,6 +825,9 @@ exports.sendQuotationToCustomer = async (req, res) => {
 
     const quotation = await Quotation.create({
       customerId: targetCustomerId,
+      createdBy: req.user._id,
+      createdByName: req.user.name || 'Sales Officer',
+      createdByRole: 'sales',
       quotationNumber,
       title,
       subTotal: Number(subTotal) || Number(totalAmount),
@@ -811,21 +938,75 @@ exports.createApprovalRequest = async (req, res) => {
 // 16. Support Tickets / Helpdesk for Staff
 exports.getStaffTickets = async (req, res) => {
   try {
-    // 1. Find all customers who have leads/enquiries assigned to this staff member
-    const myEnquiries = await Enquiry.find({ assignedSalesId: req.user._id }).select('customerId');
-    const myCustomerIds = myEnquiries.map(e => e.customerId).filter(Boolean);
+    const empId = req.user._id;
 
-    // 2. Return tickets explicitly assigned to this staff member OR from their assigned customers OR general tickets
+    // 1. Find all customers from leads/enquiries assigned to this sales employee
+    const myEnquiries = await Enquiry.find({
+      $or: [
+        { assignedSalesId: empId },
+        { assignedSales: empId },
+        { 'assignedSales.email': req.user.email }
+      ]
+    }).select('customerId');
+
+    // 2. Find customers from deals assigned to this employee
+    const myDeals = await Deal.find({
+      $or: [
+        { assignedSales: empId },
+        { assignedTo: empId }
+      ]
+    }).select('customerId');
+
+    // 3. Find customers from quotations created or assigned to this employee
+    const myQuotations = await Quotation.find({
+      $or: [
+        { createdBy: empId },
+        { assignedSales: empId }
+      ]
+    }).select('customerId');
+
+    const customerIdSet = new Set();
+    myEnquiries.forEach(e => { if (e.customerId) customerIdSet.add(String(e.customerId)); });
+    myDeals.forEach(d => { if (d.customerId) customerIdSet.add(String(d.customerId)); });
+    myQuotations.forEach(q => { if (q.customerId) customerIdSet.add(String(q.customerId)); });
+
+    const myCustomerIds = Array.from(customerIdSet);
+
+    // Return ONLY tickets strictly belonging to this employee's assigned clients or assigned explicitly to this employee
     const tickets = await Ticket.find({
       $or: [
-        { assignedTo: req.user._id },
-        { customerId: { $in: myCustomerIds } },
-        { assignedTo: { $exists: false } },
-        { assignedTo: null }
+        { assignedTo: empId },
+        { customerId: { $in: myCustomerIds } }
       ]
     }).populate('customerId', 'name company email phone').sort({ createdAt: -1 });
 
     res.json({ success: true, data: tickets });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Mark ticket messages as seen by employee
+exports.markTicketSeen = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const ticket = await Ticket.findById(id);
+    if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
+
+    let updated = false;
+    ticket.messages.forEach(msg => {
+      if (msg.sender === 'customer' && !msg.seen) {
+        msg.seen = true;
+        msg.seenAt = new Date();
+        msg.seenBy = req.user._id;
+        updated = true;
+      }
+    });
+
+    if (updated) {
+      await ticket.save();
+    }
+    res.json({ success: true, data: ticket });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -844,10 +1025,20 @@ exports.replyStaffTicket = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
 
+    // Also mark customer messages as seen when staff replies
+    ticket.messages.forEach(msg => {
+      if (msg.sender === 'customer' && !msg.seen) {
+        msg.seen = true;
+        msg.seenAt = new Date();
+        msg.seenBy = req.user._id;
+      }
+    });
+
     ticket.messages.push({
       sender: 'support',
       senderName: req.user.name || 'Sales Support Officer',
       message: message.trim(),
+      seen: false,
       createdAt: new Date()
     });
 

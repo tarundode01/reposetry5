@@ -60,6 +60,7 @@ router.post('/approvals', salesController.createApprovalRequest);
 // Support & Customer Queries
 router.get('/tickets', salesController.getStaffTickets);
 router.post('/tickets/:id/reply', salesController.replyStaffTicket);
+router.put('/tickets/:id/seen', salesController.markTicketSeen);
 
 // Notifications & Realtime Alerts
 router.get('/notifications', salesController.getStaffNotifications);
