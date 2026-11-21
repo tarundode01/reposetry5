@@ -613,10 +613,46 @@ exports.createDealAdmin = async (req, res) => {
 // 7. Approvals Management
 exports.getAllApprovals = async (req, res) => {
   try {
+    // 1. Fetch all explicit ApprovalRequests
     const approvals = await ApprovalRequest.find({})
-      .populate('employee', 'name email phone role designation')
+      .populate('employee', 'name email phone role designation status isApproved')
       .populate('requestedBy', 'name email phone role company businessType designation status isApproved')
       .sort({ createdAt: -1 });
+
+    // 2. Fetch all users who registered and are pending approval
+    const pendingUsers = await User.find({
+      $or: [
+        { status: 'pending_approval' },
+        { isApproved: false, role: { $in: ['sales', 'support', 'employee', 'customer'] } }
+      ]
+    }).select('-password').sort({ createdAt: -1 });
+
+    // 3. For any pending user that doesn't have an ApprovalRequest yet, auto-generate in-memory/DB record
+    for (const u of pendingUsers) {
+      const exists = approvals.some(a => 
+        (a.employee && String(a.employee._id || a.employee) === String(u._id)) ||
+        (a.requestedBy && String(a.requestedBy._id || a.requestedBy) === String(u._id))
+      );
+      if (!exists) {
+        const isSales = u.role === 'sales' || u.role === 'support' || u.role === 'employee';
+        const reqType = isSales ? 'New Employee Registration' : 'New Customer Registration';
+        const newApp = await ApprovalRequest.create({
+          employee: u._id,
+          requestedBy: u._id,
+          requestType: reqType,
+          subject: `${reqType}: ${u.name} (${u.designation || u.role || 'Staff'})`,
+          description: `Account request for ${u.name} (${u.email}, ${u.phone || 'N/A'}). Role: ${u.role}. Awaiting managerial activation.`,
+          requestedByName: `${u.name} (${u.designation || u.role || 'Staff'})`,
+          targetRole: u.role || 'sales',
+          status: 'Pending'
+        });
+        const populated = await ApprovalRequest.findById(newApp._id)
+          .populate('employee', 'name email phone role designation status isApproved')
+          .populate('requestedBy', 'name email phone role company businessType designation status isApproved');
+        approvals.unshift(populated);
+      }
+    }
+
     res.json({ success: true, data: approvals });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -637,10 +673,11 @@ exports.updateApproval = async (req, res) => {
     if (
       (approval.requestType === 'New Employee Registration' ||
         approval.requestType === 'New Customer Registration') &&
-      approval.requestedBy
+      (approval.requestedBy || approval.employee)
     ) {
+      const targetUserId = approval.requestedBy || approval.employee;
       const isApproved = status === 'Approved';
-      await User.findByIdAndUpdate(approval.requestedBy, {
+      await User.findByIdAndUpdate(targetUserId, {
         status: isApproved ? 'active' : 'suspended',
         isApproved
       });
